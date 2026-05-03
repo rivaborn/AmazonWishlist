@@ -14,6 +14,7 @@
     <a href="/books" class="{{ 'active' if active == 'books' }}">All Books</a>
     <a href="/no-price" class="{{ 'active' if active == 'no_price' }}">No Price</a>
     <a href="/price-drops" class="{{ 'active' if active == 'price_drops' }}">Price Drops</a>
+    <a href="/purchased" class="{{ 'active' if active == 'purchased' }}">Purchased</a>
     <a href="/wishlists" class="{{ 'active' if active == 'wishlists' }}">Wishlists</a>
     <a href="/login" class="{{ 'active' if active == 'login' }}">Login</a>
   </nav>
@@ -21,5 +22,32 @@
 <main>
   {% block content %}{% endblock %}
 </main>
+<script>
+(function () {
+  document.addEventListener('change', async function (e) {
+    var cb = e.target.closest && e.target.closest('.purchased-cb');
+    if (!cb) return;
+    cb.disabled = true;
+    try {
+      var r = await fetch('/api/books/' + encodeURIComponent(cb.dataset.asin) + '/purchased', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({purchased: cb.checked}),
+      });
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      var tr = cb.closest('tr');
+      if (tr) {
+        tr.style.transition = 'opacity .25s';
+        tr.style.opacity = '0.3';
+        setTimeout(function () { tr.remove(); }, 250);
+      }
+    } catch (err) {
+      cb.checked = !cb.checked;
+      cb.disabled = false;
+      console.error('Failed to update purchased flag:', err);
+    }
+  });
+})();
+</script>
 </body>
 </html>

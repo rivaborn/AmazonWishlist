@@ -18,7 +18,8 @@ CREATE TABLE IF NOT EXISTS book (
     author       TEXT,
     product_url  TEXT NOT NULL,
     first_seen   TEXT NOT NULL,
-    last_seen    TEXT NOT NULL
+    last_seen    TEXT NOT NULL,
+    purchased    INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS wishlist_book (
@@ -52,6 +53,10 @@ def _migrate(conn) -> None:
     cols = {r[1] for r in conn.execute("PRAGMA table_info(wishlist)").fetchall()}
     if "last_scraped_at" not in cols:
         conn.execute("ALTER TABLE wishlist ADD COLUMN last_scraped_at TEXT")
+
+    book_cols = {r[1] for r in conn.execute("PRAGMA table_info(book)").fetchall()}
+    if "purchased" not in book_cols:
+        conn.execute("ALTER TABLE book ADD COLUMN purchased INTEGER NOT NULL DEFAULT 0")
 
 
 @contextmanager

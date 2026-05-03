@@ -1,7 +1,7 @@
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
-from fastapi import APIRouter, Form, HTTPException
+from fastapi import APIRouter, Body, Form, HTTPException
 from fastapi.responses import JSONResponse, RedirectResponse
 
 from .. import services
@@ -39,3 +39,15 @@ def run_scrape_now():
 @router.get("/scrape/status")
 def scrape_status():
     return services.get_progress()
+
+
+@router.post("/books/{asin}/purchased")
+def set_purchased(asin: str, body: dict = Body(...)):
+    if "purchased" not in body:
+        raise HTTPException(400, "missing 'purchased' field")
+    purchased = bool(body["purchased"])
+    try:
+        services.set_book_purchased(asin, purchased)
+    except KeyError:
+        raise HTTPException(404, f"unknown asin: {asin}")
+    return {"asin": asin, "purchased": purchased}

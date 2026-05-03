@@ -12,15 +12,18 @@
 {% if not rows %}
   <p class="empty">No books with a current price yet. Add a wishlist and run a scrape.</p>
 {% else %}
+{% with pager=pagination %}{% include "_pagination.html" %}{% endwith %}
 <table>
   <thead>
     <tr>
+      <th class="cb-col"></th>
       <th>Title</th><th>Author</th><th>Price</th><th>List</th><th>Last seen</th>
     </tr>
   </thead>
   <tbody>
   {% for r in rows %}
     <tr>
+      <td class="cb-col"><input type="checkbox" class="purchased-cb" data-asin="{{ r.asin }}" title="Mark as purchased"></td>
       <td><a href="{{ r.product_url }}" target="_blank" rel="noopener">{{ r.title }}</a></td>
       <td>{{ r.author or '' }}</td>
       <td>${{ '%.2f' % (r.current_price_cents / 100) }}</td>
@@ -30,5 +33,6 @@
   {% endfor %}
   </tbody>
 </table>
+{% with pager=pagination %}{% include "_pagination.html" %}{% endwith %}
 {% endif %}
 {% endblock %}

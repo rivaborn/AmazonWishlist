@@ -36,3 +36,4 @@ class BookRow:
     observed_at: str
     drop_dollar: Optional[float] = None
     drop_pct: Optional[float] = None
+    purchased: bool = False

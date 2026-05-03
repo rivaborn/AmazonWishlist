@@ -331,7 +331,7 @@ prev AS (
     ) p ON p.asin = s.asin AND p.max_t = s.observed_at
 )
 SELECT DISTINCT
-    b.asin, b.title, b.author, b.product_url,
+    b.asin, b.title, b.author, b.product_url, b.purchased,
     l.current_price_cents, l.list_price_cents, l.availability, l.observed_at,
     pr.prev_price_cents
 FROM latest l
@@ -366,7 +366,16 @@ def _row_to_book(row, basis: Basis) -> BookRow:
         observed_at=row["observed_at"],
         drop_dollar=drop_dollar,
         drop_pct=drop_pct,
+        purchased=bool(_row_get(row, "purchased")),
     )
+
+
+def _row_get(row, key, default=None):
+    """Safely read a column from a sqlite3.Row; returns default if absent."""
+    try:
+        return row[key]
+    except (IndexError, KeyError):
+        return default
 
 
 def deals(min_dollar: float, min_pct: float, basis: Basis) -> list[BookRow]:
@@ -376,6 +385,8 @@ def deals(min_dollar: float, min_pct: float, basis: Basis) -> list[BookRow]:
     out: list[BookRow] = []
     for r in rows:
         if r["availability"] != "available":
+            continue
+        if r["purchased"]:
             continue
         b = _row_to_book(r, basis)
         if b.drop_dollar is None:
@@ -401,6 +412,8 @@ def all_books_by_price() -> tuple[list[BookRow], dict]:
     for r in rows:
         if r["availability"] != "available" or r["current_price_cents"] is None:
             continue
+        if r["purchased"]:
+            continue
         out.append(_row_to_book(r, "list"))
     out.sort(key=lambda b: b.current_price_cents or 0)
 
@@ -419,18 +432,20 @@ def no_price_books() -> dict[str, list[BookRow]]:
     for r in rows:
         if r["availability"] == "available":
             continue
+        if r["purchased"]:
+            continue
         b = _row_to_book(r, "list")
         groups.setdefault(r["availability"], []).append(b)
     return groups
 
 
 def price_drop_history(
-    min_dollar: float, min_pct: float, basis: Basis, limit: int = 500
+    min_dollar: float, min_pct: float, basis: Basis, limit: int = 5000
 ) -> list[BookRow]:
     """Every (asin, snapshot) pair where the snapshot dropped vs. baseline."""
     sql = """
     SELECT
-        b.asin, b.title, b.author, b.product_url,
+        b.asin, b.title, b.author, b.product_url, b.purchased,
         s.current_price_cents, s.list_price_cents, s.availability, s.observed_at,
         (
             SELECT s2.current_price_cents
@@ -441,6 +456,7 @@ def price_drop_history(
     FROM price_snapshot s
     JOIN book b ON b.asin = s.asin
     JOIN wishlist_book wb ON wb.asin = s.asin
+    WHERE b.purchased = 0
     ORDER BY s.observed_at DESC
     LIMIT 5000
     """
@@ -464,3 +480,41 @@ def price_drop_history(
         if len(out) >= limit:
             break
     return out
+
+
+def purchased_books() -> list[BookRow]:
+    """Books marked as already purchased — independent of current wishlist membership."""
+    sql = """
+    WITH latest AS (
+        SELECT s.*
+        FROM price_snapshot s
+        JOIN (
+            SELECT asin, MAX(observed_at) AS max_t
+            FROM price_snapshot
+            GROUP BY asin
+        ) m ON m.asin = s.asin AND m.max_t = s.observed_at
+    )
+    SELECT
+        b.asin, b.title, b.author, b.product_url, b.purchased,
+        l.current_price_cents, l.list_price_cents, l.availability, l.observed_at,
+        NULL AS prev_price_cents
+    FROM book b
+    JOIN latest l ON l.asin = b.asin
+    WHERE b.purchased = 1
+    ORDER BY b.last_seen DESC
+    """
+    with connect() as conn:
+        rows = conn.execute(sql).fetchall()
+    return [_row_to_book(r, "list") for r in rows]
+
+
+def set_book_purchased(asin: str, purchased: bool) -> bool:
+    """Flip the purchased flag on a single book; returns the new value."""
+    with connect() as conn:
+        cur = conn.execute(
+            "UPDATE book SET purchased = ? WHERE asin = ?",
+            (1 if purchased else 0, asin),
+        )
+        if cur.rowcount == 0:
+            raise KeyError(f"unknown asin: {asin}")
+    return purchased

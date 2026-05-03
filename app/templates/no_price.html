@@ -4,15 +4,17 @@
 <h2>Books without a price</h2>
 
 <section>
-  <h3>Kindle edition unavailable ({{ kindle_unavailable|length }})</h3>
+  <h3>Kindle edition unavailable ({{ kindle_pagination.total }})</h3>
   {% if not kindle_unavailable %}
     <p class="empty">None right now.</p>
   {% else %}
+  {% with pager=kindle_pagination %}{% include "_pagination.html" %}{% endwith %}
   <table>
-    <thead><tr><th>Title</th><th>Author</th><th>Last seen</th></tr></thead>
+    <thead><tr><th class="cb-col"></th><th>Title</th><th>Author</th><th>Last seen</th></tr></thead>
     <tbody>
       {% for r in kindle_unavailable %}
       <tr>
+        <td class="cb-col"><input type="checkbox" class="purchased-cb" data-asin="{{ r.asin }}" title="Mark as purchased"></td>
         <td><a href="{{ r.product_url }}" target="_blank" rel="noopener">{{ r.title }}</a></td>
         <td>{{ r.author or '' }}</td>
         <td class="ts">{{ r.observed_at }}</td>
@@ -20,19 +22,22 @@
       {% endfor %}
     </tbody>
   </table>
+  {% with pager=kindle_pagination %}{% include "_pagination.html" %}{% endwith %}
   {% endif %}
 </section>
 
 <section>
-  <h3>Removed from Amazon ({{ page_404|length }})</h3>
+  <h3>Removed from Amazon ({{ p404_pagination.total }})</h3>
   {% if not page_404 %}
     <p class="empty">None right now.</p>
   {% else %}
+  {% with pager=p404_pagination %}{% include "_pagination.html" %}{% endwith %}
   <table>
-    <thead><tr><th>Title</th><th>Author</th><th>Last seen</th></tr></thead>
+    <thead><tr><th class="cb-col"></th><th>Title</th><th>Author</th><th>Last seen</th></tr></thead>
     <tbody>
       {% for r in page_404 %}
       <tr>
+        <td class="cb-col"><input type="checkbox" class="purchased-cb" data-asin="{{ r.asin }}" title="Mark as purchased"></td>
         <td><a href="{{ r.product_url }}" target="_blank" rel="noopener">{{ r.title }}</a></td>
         <td>{{ r.author or '' }}</td>
         <td class="ts">{{ r.observed_at }}</td>
@@ -40,6 +45,7 @@
       {% endfor %}
     </tbody>
   </table>
+  {% with pager=p404_pagination %}{% include "_pagination.html" %}{% endwith %}
   {% endif %}
 </section>
 {% endblock %}

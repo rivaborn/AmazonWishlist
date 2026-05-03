@@ -1,0 +1,32 @@
+{% set p = pager %}
+{% if p.total_pages > 1 %}
+<nav class="pager" aria-label="pagination">
+  {% set prev_n = p.page - 1 %}
+  {% set next_n = p.page + 1 %}
+  {% if p.page > 1 %}
+    <a class="pg" href="{{ p.base_url }}?{{ p.page_param }}={{ prev_n }}{{ p.extra_qs }}">‹ Prev</a>
+  {% else %}
+    <span class="pg disabled">‹ Prev</span>
+  {% endif %}
+
+  {% for n in p.page_numbers %}
+    {% if n is string %}
+      <span class="pg gap">…</span>
+    {% elif n == p.page %}
+      <span class="pg current" aria-current="page">{{ n }}</span>
+    {% else %}
+      <a class="pg" href="{{ p.base_url }}?{{ p.page_param }}={{ n }}{{ p.extra_qs }}">{{ n }}</a>
+    {% endif %}
+  {% endfor %}
+
+  {% if p.page < p.total_pages %}
+    <a class="pg" href="{{ p.base_url }}?{{ p.page_param }}={{ next_n }}{{ p.extra_qs }}">Next ›</a>
+  {% else %}
+    <span class="pg disabled">Next ›</span>
+  {% endif %}
+
+  <span class="pg-meta">page {{ p.page }} of {{ p.total_pages }} · {{ p.total }} item{{ '' if p.total == 1 else 's' }}</span>
+</nav>
+{% elif p.total > 0 %}
+<p class="pg-meta">{{ p.total }} item{{ '' if p.total == 1 else 's' }}</p>
+{% endif %}
