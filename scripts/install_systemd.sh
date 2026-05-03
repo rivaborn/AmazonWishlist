@@ -37,7 +37,8 @@ chown -R "$APP_USER:$APP_USER" "$APP_DIR"
 
 install -m 644 "$APP_DIR/amazon-wishlist.service" /etc/systemd/system/amazon-wishlist.service
 systemctl daemon-reload
-systemctl enable --now amazon-wishlist.service
+systemctl enable amazon-wishlist.service
+systemctl restart amazon-wishlist.service
 systemctl status --no-pager amazon-wishlist.service || true
 
 echo
