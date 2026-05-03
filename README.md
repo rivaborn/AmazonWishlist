@@ -1,13 +1,14 @@
 # Amazon Wishlist Deal Tracker
 
-Self-hosted FastAPI app that watches your **public** Amazon ebook wishlists and shows deals, missing-price items, and price-drop history on a small web UI at port 9060.
+Self-hosted FastAPI app that watches your **public** Amazon ebook wishlists and shows deals, the full catalog, missing-price items, and price-drop history on a small web UI at port 9060.
 
 ## How it works
 
-- Scrapes each registered wishlist URL once a day at 08:00 server-local time (also on demand via the "Run scrape now" button).
+- Scrapes each registered wishlist URL once a day at 03:00 server-local time, **at most one wishlist per hour** to stay under Amazon's bot-detection threshold (also on demand via the "Run scrape now" button — same pacing applies).
 - Stores every observation as a snapshot in SQLite, so price-drop math works against either the previous observed price or Amazon's list/strikethrough price.
 - Collapses duplicate ASINs across wishlists.
 - Only shows books that are *currently* on a wishlist.
+- Detects Amazon's anti-automation stub page; if a wishlist is bot-blocked, the previous successful state is preserved (no clobbering with 0 items).
 
 ## Prerequisites
 
@@ -32,49 +33,104 @@ uvicorn app.main:app --reload --port 9060
 
 Open <http://localhost:9060/wishlists>, paste a public wishlist URL, click **Add**, then **Run scrape now**.
 
+For a quick smoke test (no network — uses fake scraped items): `python scripts/_smoke.py`.
+
 ## Production deploy on Ubuntu
 
 ```bash
 sudo bash scripts/install_systemd.sh
 ```
 
-The script:
+The script is **idempotent** — re-run it after every code change and it will rsync new files into `/opt/amazon-wishlist`, refresh the venv, and `systemctl restart` the unit. The SQLite DB and `diagnostics/` folder under `/opt/amazon-wishlist/data/` are preserved.
+
+What it does on first run:
 
 - Creates a `wishlist` system user.
 - Copies the repo to `/opt/amazon-wishlist`.
-- Builds a venv, installs deps.
+- Builds a venv (with an `ensurepip` fallback for Ubuntu builds where `python3 -m venv` skips pip).
+- Installs deps.
 - Installs and starts the `amazon-wishlist.service` systemd unit.
 
-Check status / logs:
+### Standard deploy loop (after a code change)
+
+```bash
+cd ~/AmazonWishlist
+git pull
+sudo bash scripts/install_systemd.sh
+```
+
+### Status / logs
 
 ```bash
 systemctl status amazon-wishlist
 journalctl -u amazon-wishlist -f
-tail -f /opt/amazon-wishlist/data/scrape.log
+sudo tail -f /opt/amazon-wishlist/data/scrape.log
 ```
 
+If a scrape returned 0 items for a list and you want to see *why*, look in `/opt/amazon-wishlist/data/diagnostics/` — the scraper saves the raw HTML of any page that yielded zero rows or hit the anti-bot stub.
+
 ## Configuration (env vars)
+
+Set in `amazon-wishlist.service` under `Environment=` if you need to override.
 
 | var | default | meaning |
 | --- | --- | --- |
 | `WISHLIST_PORT` | `9060` | HTTP port |
 | `WISHLIST_DB` | `data/wishlist.db` | SQLite path |
 | `WISHLIST_LOG` | `data/scrape.log` | rotating scrape log |
-| `WISHLIST_SCRAPE_HOUR` | `8` | daily cron hour (server local) |
+| `WISHLIST_SCRAPE_HOUR` | `3` | daily cron hour (server local) |
 | `WISHLIST_SCRAPE_MINUTE` | `0` | daily cron minute |
-| `WISHLIST_DELAY_MIN` / `WISHLIST_DELAY_MAX` | `1.5` / `3.0` | jittered delay between requests, seconds |
-| `WISHLIST_USER_AGENT` | Chrome 124 | UA string sent to Amazon |
+| `WISHLIST_PER_LIST_SECONDS` | `3600` | minimum seconds between starting one wishlist and the next during a single run. Set to `0` to disable pacing for one-off testing. |
+| `WISHLIST_DELAY_MIN` / `WISHLIST_DELAY_MAX` | `4.0` / `9.0` | jittered delay between page-level requests within a single wishlist scrape, seconds |
+| `WISHLIST_TIMEOUT` | `20` | per-request HTTP timeout, seconds |
+| `WISHLIST_USER_AGENT` | recent Chrome | UA string sent to Amazon |
 
 ## Pages
 
-- **/deals** — books on a wishlist whose latest snapshot is below baseline by ≥ filters.
-- **/no-price** — split into "Kindle edition unavailable" and "Removed from Amazon".
+- **/deals** — books on a wishlist whose latest snapshot is below baseline by ≥ filters. Filter by minimum dollar drop, minimum percent drop, and basis (vs. previous observed price or vs. list/strikethrough price).
+- **/books** — every available book across all wishlists, sorted by current price ascending. Header shows total count, lowest, and highest.
+- **/no-price** — split into "Kindle edition unavailable" and "Removed from Amazon" (HTTP 404).
 - **/price-drops** — every historical snapshot that dropped vs. its baseline, filtered.
-- **/wishlists** — add/remove wishlist URLs, run scrape on demand.
+- **/wishlists** — add/remove wishlist URLs, run scrape on demand. Each row shows when it was last scraped and the item count from that scrape. The Run-scrape button shows a live progress bar and a "Waiting until HH:MM:SS" indicator between paced scrapes.
 
-Filters on each page: minimum dollar drop, minimum percent drop, basis (vs. previous price or vs. list price).
+## Scrape progress / status API
+
+Two JSON endpoints back the wishlists page UI and can be polled by anything else:
+
+- `POST /api/scrape/run` — starts a full scrape. If one is already running, returns `{"started": false, "progress": {...}}` instead of stacking a duplicate.
+- `GET /api/scrape/status` — current progress. Shape:
+
+  ```json
+  {
+    "running": true,
+    "started_at": "2026-05-03T03:00:00.000000",
+    "finished_at": null,
+    "total": 7,
+    "done": 2,
+    "current_label": "Book List 3",
+    "current_url": "https://www.amazon.com/hz/wishlist/ls/...",
+    "items_total": 294,
+    "error": null,
+    "waiting": false,
+    "next_starts_at": null
+  }
+  ```
+
+  When `waiting` is `true`, the run is mid-pacing-gap and `next_starts_at` is the ISO timestamp the next wishlist will start.
+
+## Data model
+
+SQLite, file at `data/wishlist.db`. Schema is created/migrated on startup.
+
+- `wishlist` — registered URLs (`url`, `label`, `added_at`, `last_scraped_at`).
+- `book` — one row per ASIN ever seen (`title`, `author`, `product_url`, `first_seen`, `last_seen`).
+- `wishlist_book` — many-to-many; rebuilt for a wishlist on each successful scrape, so removing an item from your Amazon wishlist drops it off `/deals` etc. but keeps its history.
+- `price_snapshot` — append-only `(asin, observed_at, current_price_cents, list_price_cents, availability)`.
+
+`availability` is `available` | `kindle_unavailable` | `page_404`.
 
 ## Notes / limitations
 
-- Amazon's HTML changes occasionally; if scrapes start returning 0 items, check the selectors in `app/scraper.py`.
-- This is a single-user app; there's no auth on the web UI. Don't expose it to the public internet without a reverse proxy + auth.
+- Amazon actively rate-limits scrapers. The defaults (3 AM start, 1-hour pacing, 4–9 s per-page jitter, browser-like headers) are tuned to fly under the radar for accounts with a handful of wishlists totaling around 1,000 items. Larger accounts or noisier IPs may still see occasional bot-blocks; the app preserves the prior state when this happens and saves the offending HTML to `data/diagnostics/`.
+- Amazon's HTML structure changes occasionally. If scrapes start returning 0 items *without* a "bot-blocked" status, check `data/diagnostics/` for the saved HTML and update the selectors in `app/scraper.py`.
+- This is a single-user app; there is no auth on the web UI. Don't expose it to the public internet without a reverse proxy + auth in front.
