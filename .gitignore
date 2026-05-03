@@ -8,3 +8,4 @@ data/
 .env
 .idea/
 .vscode/
+scripts/_bootstrap_ssh.py

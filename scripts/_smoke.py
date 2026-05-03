@@ -90,6 +90,17 @@ def main() -> int:
     history = price_drop_history(0, 0, "prev")
     assert any(r.asin == "B0FAKE0001" for r in history), history
 
+    # last_scraped_at is set on ingest+mark; list_wishlists exposes it
+    from app.services import _mark_scraped, get_progress, list_wishlists
+    _mark_scraped(wid)
+    rows = list_wishlists()
+    assert rows[0]["last_scraped_at"] is not None, rows
+    # progress snapshot is callable and shape-stable
+    snap = get_progress()
+    for k in ("running", "started_at", "finished_at", "total", "done",
+              "current_label", "current_url", "items_total", "error"):
+        assert k in snap, snap
+
     # Hit every page through the HTTP layer
     paths = [
         "/",
@@ -104,6 +115,13 @@ def main() -> int:
             r = c.get(p, follow_redirects=True)
             print(f"{p:50s} -> {r.status_code} ({len(r.text)} bytes)")
             assert r.status_code == 200, (p, r.status_code, r.text[:200])
+
+        # /api/scrape/status returns the progress shape, even with no scrape yet
+        r = c.get("/api/scrape/status")
+        assert r.status_code == 200, r.text
+        data = r.json()
+        assert "running" in data and "done" in data and "total" in data, data
+        print(f"/api/scrape/status                                 -> {r.status_code} ({data})")
 
     print("ALL CHECKS PASSED")
     return 0

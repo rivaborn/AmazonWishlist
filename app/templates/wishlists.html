@@ -23,13 +23,14 @@
     <p class="empty">No wishlists yet.</p>
   {% else %}
   <table>
-    <thead><tr><th>Label</th><th>URL</th><th>Added</th><th></th></tr></thead>
+    <thead><tr><th>Label</th><th>URL</th><th>Added</th><th>Last scraped</th><th></th></tr></thead>
     <tbody>
       {% for w in wishlists %}
       <tr>
         <td>{{ w.label or '—' }}</td>
         <td><a href="{{ w.url }}" target="_blank" rel="noopener">{{ w.url }}</a></td>
         <td class="ts">{{ w.added_at }}</td>
+        <td class="ts">{{ w.last_scraped_at or '—' }}</td>
         <td>
           <form method="post" action="/api/wishlists/{{ w.id }}/delete" style="display:inline">
             <button type="submit" class="danger">Remove</button>
@@ -42,10 +43,86 @@
   {% endif %}
 </section>
 
-<section>
-  <form method="post" action="/api/scrape/run">
-    <button type="submit" class="primary">Run scrape now</button>
-  </form>
+<section id="scrape-section">
+  <button id="scrape-btn" class="primary" type="button">Run scrape now</button>
+  <div id="scrape-progress" hidden>
+    <progress id="scrape-bar" value="0" max="1"></progress>
+    <div id="scrape-status" class="hint"></div>
+  </div>
   <p class="hint">Daily scrape runs at 08:00 server time.</p>
 </section>
+
+<script>
+(function () {
+  const btn = document.getElementById('scrape-btn');
+  const wrap = document.getElementById('scrape-progress');
+  const bar = document.getElementById('scrape-bar');
+  const status = document.getElementById('scrape-status');
+  let polling = false;
+
+  function render(p) {
+    if (p.total > 0) {
+      bar.max = p.total;
+      bar.value = p.done;
+    } else {
+      bar.removeAttribute('value');
+      bar.max = 1;
+    }
+    if (p.running) {
+      const target = p.current_label || p.current_url || '…';
+      status.textContent = `Scraping ${target}  (${p.done}/${p.total}, ${p.items_total} items so far)`;
+      btn.disabled = true;
+      btn.textContent = 'Scraping…';
+      wrap.hidden = false;
+    } else if (p.finished_at) {
+      status.textContent = p.error
+        ? `Failed: ${p.error}`
+        : `Done — ${p.items_total} items across ${p.total} wishlists`;
+      btn.disabled = false;
+      btn.textContent = 'Run scrape now';
+      wrap.hidden = false;
+    } else {
+      wrap.hidden = true;
+      btn.disabled = false;
+      btn.textContent = 'Run scrape now';
+    }
+  }
+
+  async function fetchStatus() {
+    const r = await fetch('/api/scrape/status', { headers: { Accept: 'application/json' } });
+    return r.json();
+  }
+
+  async function poll() {
+    if (polling) return;
+    polling = true;
+    try {
+      while (true) {
+        const p = await fetchStatus();
+        render(p);
+        if (!p.running) {
+          if (p.finished_at) setTimeout(() => location.reload(), 1500);
+          return;
+        }
+        await new Promise(r => setTimeout(r, 1000));
+      }
+    } finally {
+      polling = false;
+    }
+  }
+
+  btn.addEventListener('click', async () => {
+    btn.disabled = true;
+    btn.textContent = 'Starting…';
+    await fetch('/api/scrape/run', { method: 'POST', headers: { Accept: 'application/json' } });
+    poll();
+  });
+
+  // If a scrape is already running when the page loads, jump in.
+  fetchStatus().then(p => {
+    if (p.running) poll();
+    else if (p.finished_at) render(p);
+  });
+})();
+</script>
 {% endblock %}

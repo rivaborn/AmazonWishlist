@@ -2,7 +2,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
 from fastapi import APIRouter, Form, HTTPException
-from fastapi.responses import RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 
 from .. import services
 
@@ -27,5 +27,15 @@ def delete_wishlist(wishlist_id: int):
 
 @router.post("/scrape/run")
 def run_scrape_now():
+    progress = services.get_progress()
+    if progress["running"]:
+        return JSONResponse({"started": False, "progress": progress}, status_code=200)
     _executor.submit(services.run_full_scrape)
-    return RedirectResponse(url="/wishlists", status_code=303)
+    return JSONResponse(
+        {"started": True, "progress": services.get_progress()}, status_code=202
+    )
+
+
+@router.get("/scrape/status")
+def scrape_status():
+    return services.get_progress()

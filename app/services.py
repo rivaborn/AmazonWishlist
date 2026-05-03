@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 from datetime import datetime
 from typing import Literal, Optional
 
@@ -13,6 +14,32 @@ from .scraper import fetch_wishlist
 log = logging.getLogger(__name__)
 
 Basis = Literal["prev", "list"]
+
+
+# ---------- in-memory scrape progress (single-process app) ----------
+
+_progress_lock = threading.Lock()
+_progress: dict = {
+    "running": False,
+    "started_at": None,
+    "finished_at": None,
+    "total": 0,
+    "done": 0,
+    "current_label": None,
+    "current_url": None,
+    "items_total": 0,
+    "error": None,
+}
+
+
+def get_progress() -> dict:
+    with _progress_lock:
+        return dict(_progress)
+
+
+def _progress_update(**kwargs) -> None:
+    with _progress_lock:
+        _progress.update(kwargs)
 
 
 def _now() -> str:
@@ -40,9 +67,17 @@ def remove_wishlist(wishlist_id: int) -> None:
 def list_wishlists() -> list[dict]:
     with connect() as conn:
         rows = conn.execute(
-            "SELECT id, url, label, added_at FROM wishlist ORDER BY added_at"
+            "SELECT id, url, label, added_at, last_scraped_at FROM wishlist ORDER BY added_at"
         ).fetchall()
         return [dict(r) for r in rows]
+
+
+def _mark_scraped(wishlist_id: int) -> None:
+    with connect() as conn:
+        conn.execute(
+            "UPDATE wishlist SET last_scraped_at = ? WHERE id = ?",
+            (_now(), wishlist_id),
+        )
 
 
 def ingest_wishlist(wishlist_id: int, items: list[ScrapedItem]) -> None:
@@ -92,19 +127,55 @@ def ingest_wishlist(wishlist_id: int, items: list[ScrapedItem]) -> None:
 
 
 def run_full_scrape() -> dict[str, int]:
-    """Scrape every registered wishlist; return per-wishlist item counts."""
+    """Scrape every registered wishlist; return per-wishlist item counts.
+
+    Updates the in-memory progress snapshot at every step so the UI can poll.
+    Idempotent against concurrent calls only via the API guard
+    (`POST /api/scrape/run` rejects if `running` is True).
+    """
+    wishlists = list_wishlists()
+    _progress_update(
+        running=True,
+        started_at=_now(),
+        finished_at=None,
+        total=len(wishlists),
+        done=0,
+        current_label=None,
+        current_url=None,
+        items_total=0,
+        error=None,
+    )
     counts: dict[str, int] = {}
-    for w in list_wishlists():
-        log.info("Scraping wishlist %s (%s)", w["id"], w["url"])
-        try:
-            items = fetch_wishlist(w["url"])
-        except Exception as e:
-            log.exception("Scrape failed for %s: %s", w["url"], e)
-            counts[w["url"]] = 0
-            continue
-        ingest_wishlist(w["id"], items)
-        counts[w["url"]] = len(items)
-        log.info("Ingested %d items for wishlist %s", len(items), w["id"])
+    try:
+        for w in wishlists:
+            label = w.get("label") or w["url"]
+            _progress_update(current_label=label, current_url=w["url"])
+            log.info("Scraping wishlist %s (%s)", w["id"], w["url"])
+            try:
+                items = fetch_wishlist(w["url"])
+            except Exception as e:
+                log.exception("Scrape failed for %s: %s", w["url"], e)
+                counts[w["url"]] = 0
+                with _progress_lock:
+                    _progress["done"] += 1
+                continue
+            ingest_wishlist(w["id"], items)
+            _mark_scraped(w["id"])
+            counts[w["url"]] = len(items)
+            log.info("Ingested %d items for wishlist %s", len(items), w["id"])
+            with _progress_lock:
+                _progress["done"] += 1
+                _progress["items_total"] += len(items)
+    except Exception as e:
+        _progress_update(error=str(e))
+        raise
+    finally:
+        _progress_update(
+            running=False,
+            finished_at=_now(),
+            current_label=None,
+            current_url=None,
+        )
     return counts
 
 

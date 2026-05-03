@@ -5,10 +5,11 @@ from .config import DB_PATH
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS wishlist (
-    id        INTEGER PRIMARY KEY AUTOINCREMENT,
-    url       TEXT    NOT NULL UNIQUE,
-    label     TEXT,
-    added_at  TEXT    NOT NULL
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    url             TEXT    NOT NULL UNIQUE,
+    label           TEXT,
+    added_at        TEXT    NOT NULL,
+    last_scraped_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS book (
@@ -43,6 +44,14 @@ CREATE INDEX IF NOT EXISTS idx_snap_asin_time
 def init_db() -> None:
     with connect() as conn:
         conn.executescript(SCHEMA)
+        _migrate(conn)
+
+
+def _migrate(conn) -> None:
+    """In-place upgrades for older databases. Each step is a no-op if already applied."""
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(wishlist)").fetchall()}
+    if "last_scraped_at" not in cols:
+        conn.execute("ALTER TABLE wishlist ADD COLUMN last_scraped_at TEXT")
 
 
 @contextmanager
