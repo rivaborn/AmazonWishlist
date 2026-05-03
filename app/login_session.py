@@ -208,6 +208,13 @@ class LoginSessionManager:
                 "--disable-extensions",
                 "--disable-translate",
                 "--disable-infobars",
+                # Headless-friendly hardening for systemd-restricted env
+                "--no-zygote",
+                "--disable-gpu",
+                "--disable-software-rasterizer",
+                "--disable-crash-reporter",
+                "--disable-breakpad",
+                "--no-crash-upload",
             ],
         )
         # storage_state is only valid on new_context, not launch_persistent_context.

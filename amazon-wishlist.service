@@ -16,10 +16,13 @@ Restart=on-failure
 RestartSec=5
 
 # Hardening
+# NOTE: chromium's multi-process model (zygote / crashpad / IPC sockets) is
+# fragile under systemd PrivateTmp and ProtectHome. We keep NoNewPrivileges
+# and a softened ProtectSystem; PrivateTmp is dropped because chromium's
+# child processes share /tmp socket paths the parent set up.
 NoNewPrivileges=true
-ProtectSystem=strict
-ProtectHome=true
-PrivateTmp=true
+ProtectSystem=false
+PrivateTmp=false
 ReadWritePaths=/opt/amazon-wishlist/data /opt/amazon-wishlist/.cache
 
 [Install]
