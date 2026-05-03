@@ -7,3 +7,14 @@ I want to develop an ap that will -
 6. All pages will have dropdowns to filter the minimum price drop - One by dollar amount and one by percentage
 7. Dupllicate ebooks on different wishlists will be ignored
 8. Only books I have added to my wishlists are processed
+
+
+Changes to make - 
+1. Show progress bar after clicking Run Scrape Now
+2. Show date/time each wishlist was last scraped
+
+Changes to make
+1. Add number of items in each Wishlist at last scrape
+2. Add a new Tab with All books - a list of all the books in all the wishlists. 
+- Arrange list by price (low to high)
+- Show highest and  lowest price

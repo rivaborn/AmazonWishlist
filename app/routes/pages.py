@@ -95,11 +95,14 @@ def price_drops_page(
 
 @router.get("/wishlists")
 def wishlists_page(request: Request):
+    from ..config import SCRAPE_HOUR, SCRAPE_MINUTE, SCRAPE_PER_WISHLIST_SECONDS
     return templates.TemplateResponse(
         request,
         "wishlists.html",
         {
             "wishlists": services.list_wishlists(),
             "active": "wishlists",
+            "scrape_time": f"{SCRAPE_HOUR:02d}:{SCRAPE_MINUTE:02d}",
+            "per_list_seconds": SCRAPE_PER_WISHLIST_SECONDS,
         },
     )
