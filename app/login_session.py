@@ -208,7 +208,6 @@ class LoginSessionManager:
                 "--disable-extensions",
                 "--disable-translate",
                 "--disable-infobars",
-                f"--user-data-dir={CHROMIUM_USER_DATA_DIR}",
             ],
         )
         # storage_state is only valid on new_context, not launch_persistent_context.
