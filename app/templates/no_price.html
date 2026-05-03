@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% block title %}No Price{% endblock %}
+{% block content %}
+<h2>Books without a price</h2>
+
+<section>
+  <h3>Kindle edition unavailable ({{ kindle_unavailable|length }})</h3>
+  {% if not kindle_unavailable %}
+    <p class="empty">None right now.</p>
+  {% else %}
+  <table>
+    <thead><tr><th>Title</th><th>Author</th><th>Last seen</th></tr></thead>
+    <tbody>
+      {% for r in kindle_unavailable %}
+      <tr>
+        <td><a href="{{ r.product_url }}" target="_blank" rel="noopener">{{ r.title }}</a></td>
+        <td>{{ r.author or '' }}</td>
+        <td class="ts">{{ r.observed_at }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+</section>
+
+<section>
+  <h3>Removed from Amazon ({{ page_404|length }})</h3>
+  {% if not page_404 %}
+    <p class="empty">None right now.</p>
+  {% else %}
+  <table>
+    <thead><tr><th>Title</th><th>Author</th><th>Last seen</th></tr></thead>
+    <tbody>
+      {% for r in page_404 %}
+      <tr>
+        <td><a href="{{ r.product_url }}" target="_blank" rel="noopener">{{ r.title }}</a></td>
+        <td>{{ r.author or '' }}</td>
+        <td class="ts">{{ r.observed_at }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+</section>
+{% endblock %}

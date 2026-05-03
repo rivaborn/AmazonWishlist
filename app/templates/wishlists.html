@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+{% block title %}Wishlists{% endblock %}
+{% block content %}
+<h2>Wishlists</h2>
+
+<section>
+  <h3>Add a wishlist</h3>
+  <form method="post" action="/api/wishlists" class="add-form">
+    <label>Public wishlist URL
+      <input type="url" name="url" required placeholder="https://www.amazon.com/hz/wishlist/ls/...">
+    </label>
+    <label>Label (optional)
+      <input type="text" name="label" placeholder="e.g. Sci-fi reads">
+    </label>
+    <button type="submit">Add</button>
+  </form>
+  <p class="hint">The list must be set to <strong>Public</strong> on Amazon. Edit list → "Sharing" → Public.</p>
+</section>
+
+<section>
+  <h3>Tracked wishlists ({{ wishlists|length }})</h3>
+  {% if not wishlists %}
+    <p class="empty">No wishlists yet.</p>
+  {% else %}
+  <table>
+    <thead><tr><th>Label</th><th>URL</th><th>Added</th><th></th></tr></thead>
+    <tbody>
+      {% for w in wishlists %}
+      <tr>
+        <td>{{ w.label or '—' }}</td>
+        <td><a href="{{ w.url }}" target="_blank" rel="noopener">{{ w.url }}</a></td>
+        <td class="ts">{{ w.added_at }}</td>
+        <td>
+          <form method="post" action="/api/wishlists/{{ w.id }}/delete" style="display:inline">
+            <button type="submit" class="danger">Remove</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+</section>
+
+<section>
+  <form method="post" action="/api/scrape/run">
+    <button type="submit" class="primary">Run scrape now</button>
+  </form>
+  <p class="hint">Daily scrape runs at 08:00 server time.</p>
+</section>
+{% endblock %}

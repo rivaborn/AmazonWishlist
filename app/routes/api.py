@@ -1,0 +1,31 @@
+from concurrent.futures import ThreadPoolExecutor
+from typing import Optional
+
+from fastapi import APIRouter, Form, HTTPException
+from fastapi.responses import RedirectResponse
+
+from .. import services
+
+router = APIRouter(prefix="/api")
+_executor = ThreadPoolExecutor(max_workers=1)
+
+
+@router.post("/wishlists")
+def add_wishlist(url: str = Form(...), label: Optional[str] = Form(None)):
+    url = url.strip()
+    if not url.startswith(("http://", "https://")):
+        raise HTTPException(400, "url must be http(s)")
+    services.add_wishlist(url, label.strip() if label else None)
+    return RedirectResponse(url="/wishlists", status_code=303)
+
+
+@router.post("/wishlists/{wishlist_id}/delete")
+def delete_wishlist(wishlist_id: int):
+    services.remove_wishlist(wishlist_id)
+    return RedirectResponse(url="/wishlists", status_code=303)
+
+
+@router.post("/scrape/run")
+def run_scrape_now():
+    _executor.submit(services.run_full_scrape)
+    return RedirectResponse(url="/wishlists", status_code=303)

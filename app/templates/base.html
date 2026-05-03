@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Wishlist Tracker{% endblock %}</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header>
+  <h1>Amazon Wishlist Tracker</h1>
+  <nav>
+    <a href="/deals" class="{{ 'active' if active == 'deals' }}">Deals</a>
+    <a href="/no-price" class="{{ 'active' if active == 'no_price' }}">No Price</a>
+    <a href="/price-drops" class="{{ 'active' if active == 'price_drops' }}">Price Drops</a>
+    <a href="/wishlists" class="{{ 'active' if active == 'wishlists' }}">Wishlists</a>
+  </nav>
+</header>
+<main>
+  {% block content %}{% endblock %}
+</main>
+</body>
+</html>

@@ -1,0 +1,23 @@
+[Unit]
+Description=Amazon Wishlist Deal Tracker
+After=network.target
+
+[Service]
+Type=simple
+User=wishlist
+Group=wishlist
+WorkingDirectory=/opt/amazon-wishlist
+Environment="WISHLIST_PORT=9060"
+ExecStart=/opt/amazon-wishlist/.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 9060
+Restart=on-failure
+RestartSec=5
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/opt/amazon-wishlist/data
+
+[Install]
+WantedBy=multi-user.target
