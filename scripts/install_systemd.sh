@@ -25,6 +25,11 @@ mkdir -p "$APP_DIR/data"
 if [[ ! -d "$APP_DIR/.venv" ]]; then
   python3 -m venv "$APP_DIR/.venv"
 fi
+# On some Ubuntu builds, `python3 -m venv` silently skips the pip bootstrap.
+# Force ensurepip if pip didn't land.
+if [[ ! -x "$APP_DIR/.venv/bin/pip" ]]; then
+  "$APP_DIR/.venv/bin/python" -m ensurepip --upgrade --default-pip
+fi
 "$APP_DIR/.venv/bin/pip" install --upgrade pip
 "$APP_DIR/.venv/bin/pip" install -r "$APP_DIR/requirements.txt"
 
