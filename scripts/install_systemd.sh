@@ -16,18 +16,12 @@ if ! id -u "$APP_USER" &>/dev/null; then
   useradd --system --create-home --home-dir "$APP_DIR" --shell /usr/sbin/nologin "$APP_USER"
 fi
 
-# System packages used by the Login tab (Xvfb + x11vnc + websockify + noVNC)
-# and the chromium that Playwright drives. apt-get is idempotent — runs cheap
-# on subsequent installs.
-APT_PKGS=(
-  xvfb x11vnc websockify novnc
-  # Chromium runtime deps (subset of `playwright install --with-deps`)
-  libnss3 libatk1.0-0t64 libcups2t64 libxkbcommon0
-  libxcomposite1 libxdamage1 libxrandr2 libgbm1
-  libpango-1.0-0 libcairo2 libasound2t64
-)
+# Login-tab infrastructure: virtual X display, VNC, and the noVNC web client.
+# (Chromium's own runtime deps are installed by `playwright install --with-deps`
+#  below — that picks the right package set per Ubuntu version.)
 DEBIAN_FRONTEND=noninteractive apt-get update
-DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${APT_PKGS[@]}"
+DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+  xvfb x11vnc websockify novnc
 
 mkdir -p "$APP_DIR"
 rsync -a --delete \
@@ -46,11 +40,14 @@ fi
 "$APP_DIR/.venv/bin/pip" install --upgrade pip
 "$APP_DIR/.venv/bin/pip" install -r "$APP_DIR/requirements.txt"
 
-# Playwright browser binary (chromium). Cache lives under the app dir so the
-# `wishlist` system user can read it under systemd hardening.
+# Playwright browser binary (chromium) + its system runtime deps. Cache lives
+# under the app dir so the `wishlist` system user can read it under systemd
+# hardening. `--with-deps` picks the right apt packages for this Ubuntu rev
+# (libatk-bridge, libnss3, libxkbcommon, etc.) so we don't have to maintain a
+# hand-rolled list that drifts.
 export PLAYWRIGHT_BROWSERS_PATH="$APP_DIR/.cache/playwright"
 mkdir -p "$PLAYWRIGHT_BROWSERS_PATH"
-"$APP_DIR/.venv/bin/python" -m playwright install chromium
+"$APP_DIR/.venv/bin/python" -m playwright install --with-deps chromium
 
 # Ensure the directories the service writes to exist with the right owner.
 mkdir -p "$APP_DIR/data/.chrome-login" "$APP_DIR/data/diagnostics"
