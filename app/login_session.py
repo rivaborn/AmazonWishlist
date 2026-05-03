@@ -198,27 +198,25 @@ class LoginSessionManager:
         from playwright.sync_api import sync_playwright  # type: ignore
 
         sess.playwright = sync_playwright().start()
-        env = os.environ.copy()
-        env["DISPLAY"] = XVFB_DISPLAY
-        # User-data-dir keeps Chromium-side state (caches, fingerprint) stable
-        # across login attempts. Storage state is read from STORAGE_STATE.
+        os.environ["DISPLAY"] = XVFB_DISPLAY  # picked up by chromium subprocess
         CHROMIUM_USER_DATA_DIR.mkdir(parents=True, exist_ok=True)
-        sess.browser = sess.playwright.chromium.launch_persistent_context(
-            user_data_dir=str(CHROMIUM_USER_DATA_DIR),
+
+        sess.browser = sess.playwright.chromium.launch(
             headless=False,
-            env=env,
-            storage_state=str(STORAGE_STATE) if STORAGE_STATE.is_file() else None,
-            viewport={"width": 1280, "height": 800},
             args=[
                 "--no-default-browser-check",
                 "--disable-extensions",
                 "--disable-translate",
                 "--disable-infobars",
+                f"--user-data-dir={CHROMIUM_USER_DATA_DIR}",
             ],
         )
-        # launch_persistent_context returns the context directly (browser is
-        # implicit). For storage_state.dump() we'll use this same object.
-        sess.context = sess.browser
+        # storage_state is only valid on new_context, not launch_persistent_context.
+        # Resume an existing session if a saved file is present, otherwise start fresh.
+        new_ctx_kwargs = {"viewport": {"width": 1280, "height": 800}}
+        if STORAGE_STATE.is_file() and STORAGE_STATE.stat().st_size > 200:
+            new_ctx_kwargs["storage_state"] = str(STORAGE_STATE)
+        sess.context = sess.browser.new_context(**new_ctx_kwargs)
         sess.page = sess.context.new_page()
         sess.page.goto("https://www.amazon.com/", wait_until="domcontentloaded")
 
@@ -274,6 +272,7 @@ class LoginSessionManager:
         # the rest.
         for closer, label in (
             (lambda: sess.context and sess.context.close(), "chromium-context"),
+            (lambda: sess.browser and sess.browser.close(), "chromium-browser"),
             (lambda: sess.playwright and sess.playwright.stop(), "playwright"),
         ):
             try:
