@@ -19,6 +19,6 @@ USER_AGENT = os.environ.get(
     "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
 )
 
-REQUEST_DELAY_MIN = float(os.environ.get("WISHLIST_DELAY_MIN", "1.5"))
-REQUEST_DELAY_MAX = float(os.environ.get("WISHLIST_DELAY_MAX", "3.0"))
+REQUEST_DELAY_MIN = float(os.environ.get("WISHLIST_DELAY_MIN", "4.0"))
+REQUEST_DELAY_MAX = float(os.environ.get("WISHLIST_DELAY_MAX", "9.0"))
 REQUEST_TIMEOUT = float(os.environ.get("WISHLIST_TIMEOUT", "20"))

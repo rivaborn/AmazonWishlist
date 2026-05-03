@@ -9,7 +9,7 @@ from typing import Literal, Optional
 
 from .db import connect
 from .models import BookRow, ScrapedItem
-from .scraper import fetch_wishlist
+from .scraper import BotDetected, fetch_wishlist
 
 log = logging.getLogger(__name__)
 
@@ -152,14 +152,24 @@ def run_full_scrape() -> dict[str, int]:
         error=None,
     )
     counts: dict[str, int] = {}
+    last_error: Optional[str] = None
     try:
         for w in wishlists:
             label = w.get("label") or w["url"]
             _progress_update(current_label=label, current_url=w["url"])
             log.info("Scraping wishlist %s (%s)", w["id"], w["url"])
             try:
-                items = fetch_wishlist(w["url"])
+                items = fetch_wishlist(w["url"], list_label=label)
+            except BotDetected as e:
+                # Don't ingest — keep the previous count and timestamp intact.
+                last_error = f"bot-blocked: {label}"
+                log.warning("Bot-blocked on wishlist %s: %s", w["id"], e)
+                counts[w["url"]] = 0
+                with _progress_lock:
+                    _progress["done"] += 1
+                continue
             except Exception as e:
+                last_error = f"scrape failed: {label}: {e}"
                 log.exception("Scrape failed for %s: %s", w["url"], e)
                 counts[w["url"]] = 0
                 with _progress_lock:
@@ -172,6 +182,8 @@ def run_full_scrape() -> dict[str, int]:
             with _progress_lock:
                 _progress["done"] += 1
                 _progress["items_total"] += len(items)
+        if last_error:
+            _progress_update(error=last_error)
     except Exception as e:
         _progress_update(error=str(e))
         raise
