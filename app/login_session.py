@@ -195,10 +195,14 @@ class LoginSessionManager:
             time.sleep(0.1)
 
         # 3. Playwright + Chromium under that display.
+        # IMPORTANT: set DISPLAY *before* starting Playwright. The driver
+        # process is forked at sync_playwright().start() and inherits env
+        # at that moment — later mutations of os.environ don't propagate
+        # to the chromium subprocess that the driver later spawns.
         from playwright.sync_api import sync_playwright  # type: ignore
 
+        os.environ["DISPLAY"] = XVFB_DISPLAY
         sess.playwright = sync_playwright().start()
-        os.environ["DISPLAY"] = XVFB_DISPLAY  # picked up by chromium subprocess
         CHROMIUM_USER_DATA_DIR.mkdir(parents=True, exist_ok=True)
 
         sess.browser = sess.playwright.chromium.launch(
