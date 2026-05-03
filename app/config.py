@@ -10,8 +10,13 @@ LOG_PATH = Path(os.environ.get("WISHLIST_LOG", DATA_DIR / "scrape.log"))
 
 PORT = int(os.environ.get("WISHLIST_PORT", "9060"))
 
-SCRAPE_HOUR = int(os.environ.get("WISHLIST_SCRAPE_HOUR", "8"))
+SCRAPE_HOUR = int(os.environ.get("WISHLIST_SCRAPE_HOUR", "3"))
 SCRAPE_MINUTE = int(os.environ.get("WISHLIST_SCRAPE_MINUTE", "0"))
+
+# Minimum seconds between the start of one wishlist and the start of the next
+# during a single scrape run. 3600 = at most one wishlist per hour, which keeps
+# us under Amazon's bot threshold across a multi-list account.
+SCRAPE_PER_WISHLIST_SECONDS = int(os.environ.get("WISHLIST_PER_LIST_SECONDS", "3600"))
 
 USER_AGENT = os.environ.get(
     "WISHLIST_USER_AGENT",

@@ -71,9 +71,10 @@
     }
     if (p.running) {
       const target = p.current_label || p.current_url || '…';
-      status.textContent = `Scraping ${target}  (${p.done}/${p.total}, ${p.items_total} items so far)`;
+      const prefix = p.waiting ? '' : 'Scraping ';
+      status.textContent = `${prefix}${target}  (${p.done}/${p.total}, ${p.items_total} items so far)`;
       btn.disabled = true;
-      btn.textContent = 'Scraping…';
+      btn.textContent = p.waiting ? 'Waiting…' : 'Scraping…';
       wrap.hidden = false;
     } else if (p.finished_at) {
       status.textContent = p.error
@@ -105,7 +106,8 @@
           if (p.finished_at) setTimeout(() => location.reload(), 1500);
           return;
         }
-        await new Promise(r => setTimeout(r, 1000));
+        // 1s during active fetch, 10s while waiting between wishlists
+        await new Promise(r => setTimeout(r, p.waiting ? 10000 : 1000));
       }
     } finally {
       polling = false;

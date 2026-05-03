@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import logging
 import threading
-from datetime import datetime
+import time
+from datetime import datetime, timedelta
 from typing import Literal, Optional
 
+from .config import SCRAPE_PER_WISHLIST_SECONDS
 from .db import connect
 from .models import BookRow, ScrapedItem
 from .scraper import BotDetected, fetch_wishlist
@@ -29,6 +31,8 @@ _progress: dict = {
     "current_url": None,
     "items_total": 0,
     "error": None,
+    "waiting": False,
+    "next_starts_at": None,
 }
 
 
@@ -140,6 +144,7 @@ def run_full_scrape() -> dict[str, int]:
     (`POST /api/scrape/run` rejects if `running` is True).
     """
     wishlists = list_wishlists()
+    interval = max(0, SCRAPE_PER_WISHLIST_SECONDS)
     _progress_update(
         running=True,
         started_at=_now(),
@@ -150,38 +155,68 @@ def run_full_scrape() -> dict[str, int]:
         current_url=None,
         items_total=0,
         error=None,
+        waiting=False,
+        next_starts_at=None,
     )
     counts: dict[str, int] = {}
     last_error: Optional[str] = None
     try:
-        for w in wishlists:
+        for idx, w in enumerate(wishlists):
+            wishlist_started = time.monotonic()
             label = w.get("label") or w["url"]
-            _progress_update(current_label=label, current_url=w["url"])
+            _progress_update(
+                current_label=label,
+                current_url=w["url"],
+                waiting=False,
+                next_starts_at=None,
+            )
             log.info("Scraping wishlist %s (%s)", w["id"], w["url"])
             try:
                 items = fetch_wishlist(w["url"], list_label=label)
             except BotDetected as e:
-                # Don't ingest — keep the previous count and timestamp intact.
                 last_error = f"bot-blocked: {label}"
                 log.warning("Bot-blocked on wishlist %s: %s", w["id"], e)
                 counts[w["url"]] = 0
                 with _progress_lock:
                     _progress["done"] += 1
-                continue
             except Exception as e:
                 last_error = f"scrape failed: {label}: {e}"
                 log.exception("Scrape failed for %s: %s", w["url"], e)
                 counts[w["url"]] = 0
                 with _progress_lock:
                     _progress["done"] += 1
-                continue
-            ingest_wishlist(w["id"], items)
-            _mark_scraped(w["id"])
-            counts[w["url"]] = len(items)
-            log.info("Ingested %d items for wishlist %s", len(items), w["id"])
-            with _progress_lock:
-                _progress["done"] += 1
-                _progress["items_total"] += len(items)
+            else:
+                ingest_wishlist(w["id"], items)
+                _mark_scraped(w["id"])
+                counts[w["url"]] = len(items)
+                log.info("Ingested %d items for wishlist %s", len(items), w["id"])
+                with _progress_lock:
+                    _progress["done"] += 1
+                    _progress["items_total"] += len(items)
+
+            # Pace: at most one wishlist start per `interval` seconds.
+            is_last = idx == len(wishlists) - 1
+            if not is_last and interval > 0:
+                wait_seconds = (wishlist_started + interval) - time.monotonic()
+                if wait_seconds > 0:
+                    next_at = (
+                        datetime.now() + timedelta(seconds=wait_seconds)
+                    ).isoformat(timespec="seconds")
+                    log.info("Waiting %ds before next wishlist (until %s)",
+                             int(wait_seconds), next_at)
+                    _progress_update(
+                        waiting=True,
+                        current_label=f"Waiting until {next_at[11:19]} for next wishlist",
+                        next_starts_at=next_at,
+                    )
+                    # Sleep in slices so the progress endpoint stays fresh
+                    # if the dict shape ever changes mid-wait.
+                    end = time.monotonic() + wait_seconds
+                    while True:
+                        remaining = end - time.monotonic()
+                        if remaining <= 0:
+                            break
+                        time.sleep(min(remaining, 5.0))
         if last_error:
             _progress_update(error=last_error)
     except Exception as e:
@@ -193,6 +228,8 @@ def run_full_scrape() -> dict[str, int]:
             finished_at=_now(),
             current_label=None,
             current_url=None,
+            waiting=False,
+            next_starts_at=None,
         )
     return counts
 
