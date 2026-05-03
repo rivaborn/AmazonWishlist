@@ -67,7 +67,13 @@ def remove_wishlist(wishlist_id: int) -> None:
 def list_wishlists() -> list[dict]:
     with connect() as conn:
         rows = conn.execute(
-            "SELECT id, url, label, added_at, last_scraped_at FROM wishlist ORDER BY added_at"
+            """
+            SELECT
+                w.id, w.url, w.label, w.added_at, w.last_scraped_at,
+                (SELECT COUNT(*) FROM wishlist_book wb WHERE wb.wishlist_id = w.id) AS last_item_count
+            FROM wishlist w
+            ORDER BY w.added_at
+            """
         ).fetchall()
         return [dict(r) for r in rows]
 
@@ -260,6 +266,28 @@ def deals(min_dollar: float, min_pct: float, basis: Basis) -> list[BookRow]:
         out.append(b)
     out.sort(key=lambda x: (x.drop_pct or 0), reverse=True)
     return out
+
+
+def all_books_by_price() -> tuple[list[BookRow], dict]:
+    """Every available book on any wishlist, sorted by current price ascending.
+
+    Returns (rows, summary) where summary has min/max price (cents) and count.
+    Books currently without a purchase price are excluded — they live on /no-price.
+    """
+    with connect() as conn:
+        rows = conn.execute(_LATEST_BASE).fetchall()
+    out: list[BookRow] = []
+    for r in rows:
+        if r["availability"] != "available" or r["current_price_cents"] is None:
+            continue
+        out.append(_row_to_book(r, "list"))
+    out.sort(key=lambda b: b.current_price_cents or 0)
+
+    summary: dict = {"count": len(out), "min_cents": None, "max_cents": None}
+    if out:
+        summary["min_cents"] = out[0].current_price_cents
+        summary["max_cents"] = out[-1].current_price_cents
+    return out, summary
 
 
 def no_price_books() -> dict[str, list[BookRow]]:

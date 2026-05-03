@@ -90,11 +90,19 @@ def main() -> int:
     history = price_drop_history(0, 0, "prev")
     assert any(r.asin == "B0FAKE0001" for r in history), history
 
-    # last_scraped_at is set on ingest+mark; list_wishlists exposes it
-    from app.services import _mark_scraped, get_progress, list_wishlists
+    # last_scraped_at + last_item_count are exposed by list_wishlists
+    from app.services import _mark_scraped, all_books_by_price, get_progress, list_wishlists
     _mark_scraped(wid)
     rows = list_wishlists()
     assert rows[0]["last_scraped_at"] is not None, rows
+    # day2 had two items: one available, one kindle_unavailable -> wishlist_book has 2
+    assert rows[0]["last_item_count"] == 2, rows
+
+    # All-books view: only the available one with a price; summary shows it
+    books, summary = all_books_by_price()
+    assert len(books) == 1 and books[0].asin == "B0FAKE0001", books
+    assert summary["count"] == 1
+    assert summary["min_cents"] == 499 and summary["max_cents"] == 499, summary
     # progress snapshot is callable and shape-stable
     snap = get_progress()
     for k in ("running", "started_at", "finished_at", "total", "done",
@@ -105,6 +113,7 @@ def main() -> int:
     paths = [
         "/",
         "/deals",
+        "/books",
         "/no-price",
         "/price-drops",
         "/wishlists",

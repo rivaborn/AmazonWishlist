@@ -50,3 +50,7 @@ progress::-webkit-progress-value { background: var(--accent); border-radius: 3px
 progress::-moz-progress-bar { background: var(--accent); }
 progress:not([value]) { background: linear-gradient(90deg, var(--bg), var(--accent), var(--bg)) 0/200% 100%; animation: indet 1.2s linear infinite; border: 1px solid var(--border); border-radius: 4px; }
 @keyframes indet { 0% { background-position: 0 0; } 100% { background-position: -200% 0; } }
+.summary { display: flex; gap: 1rem; flex-wrap: wrap; margin-bottom: 1rem; }
+.stat { background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: .6rem 1rem; min-width: 120px; }
+.stat-label { display: block; font-size: .75rem; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
+.stat-value { display: block; font-size: 1.4rem; font-weight: 600; color: var(--accent); margin-top: .15rem; }

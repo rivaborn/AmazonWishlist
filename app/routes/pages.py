@@ -43,6 +43,20 @@ def deals_page(
     )
 
 
+@router.get("/books")
+def books_page(request: Request):
+    rows, summary = services.all_books_by_price()
+    return templates.TemplateResponse(
+        request,
+        "books.html",
+        {
+            "rows": rows,
+            "summary": summary,
+            "active": "books",
+        },
+    )
+
+
 @router.get("/no-price")
 def no_price_page(request: Request):
     groups = services.no_price_books()
