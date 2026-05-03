@@ -8,10 +8,16 @@ import time
 from datetime import datetime, timedelta
 from typing import Literal, Optional
 
-from .config import SCRAPE_PER_WISHLIST_SECONDS
+from .config import (
+    CHROMIUM_USER_DATA_DIR,
+    PLAYWRIGHT_HEADLESS,
+    SCRAPE_PER_WISHLIST_SECONDS,
+    STORAGE_STATE,
+    use_playwright,
+)
 from .db import connect
 from .models import BookRow, ScrapedItem
-from .scraper import BotDetected, FetchFailed, fetch_wishlist
+from .scraper import BotDetected, FetchFailed, LoginExpired, fetch_wishlist
 
 log = logging.getLogger(__name__)
 
@@ -160,6 +166,13 @@ def run_full_scrape() -> dict[str, int]:
     )
     counts: dict[str, int] = {}
     last_error: Optional[str] = None
+
+    # Decide which scraper path to use *once* per run, opening one Playwright
+    # context (if applicable) for the whole run instead of paying chromium
+    # spin-up cost per wishlist.
+    pw_ctx = _open_playwright_context_or_none()
+    log.info("Scraper path: %s", "playwright" if pw_ctx is not None else "httpx")
+
     try:
         for idx, w in enumerate(wishlists):
             wishlist_started = time.monotonic()
@@ -172,7 +185,21 @@ def run_full_scrape() -> dict[str, int]:
             )
             log.info("Scraping wishlist %s (%s)", w["id"], w["url"])
             try:
-                items = fetch_wishlist(w["url"], list_label=label)
+                if pw_ctx is not None:
+                    from .scraper_playwright import fetch_wishlist_playwright
+                    items = fetch_wishlist_playwright(
+                        w["url"], list_label=label, context=pw_ctx["context"]
+                    )
+                else:
+                    items = fetch_wishlist(w["url"], list_label=label)
+            except LoginExpired as e:
+                last_error = "login expired — open Login tab and re-authenticate"
+                log.warning("Login expired on wishlist %s: %s", w["id"], e)
+                counts[w["url"]] = 0
+                with _progress_lock:
+                    _progress["done"] += 1
+                # No point continuing once the saved session is dead.
+                break
             except BotDetected as e:
                 # Don't ingest — preserve previous count + timestamp.
                 last_error = f"bot-blocked: {label}"
@@ -231,6 +258,19 @@ def run_full_scrape() -> dict[str, int]:
         _progress_update(error=str(e))
         raise
     finally:
+        if pw_ctx is not None:
+            try:
+                pw_ctx["context"].close()
+            except Exception:
+                log.exception("Failed to close Playwright context cleanly")
+            try:
+                pw_ctx["browser"].close()
+            except Exception:
+                log.exception("Failed to close Playwright browser cleanly")
+            try:
+                pw_ctx["playwright"].stop()
+            except Exception:
+                log.exception("Failed to stop Playwright cleanly")
         _progress_update(
             running=False,
             finished_at=_now(),
@@ -240,6 +280,30 @@ def run_full_scrape() -> dict[str, int]:
             next_starts_at=None,
         )
     return counts
+
+
+def _open_playwright_context_or_none() -> Optional[dict]:
+    """Open a Playwright BrowserContext for this scrape run, or return None
+    if Playwright path is disabled / unavailable (fall back to httpx).
+
+    On import or runtime failure we log loudly and return None — the run
+    proceeds via httpx instead of crashing.
+    """
+    if not use_playwright():
+        return None
+    try:
+        from playwright.sync_api import sync_playwright  # type: ignore
+    except Exception as e:
+        log.warning("Playwright import failed (%s); falling back to httpx", e)
+        return None
+    try:
+        pw = sync_playwright().start()
+        browser = pw.chromium.launch(headless=PLAYWRIGHT_HEADLESS)
+        context = browser.new_context(storage_state=str(STORAGE_STATE))
+        return {"playwright": pw, "browser": browser, "context": context}
+    except Exception as e:
+        log.warning("Playwright launch failed (%s); falling back to httpx", e)
+        return None
 
 
 # ---------- query helpers (latest snapshot per ASIN that's on a wishlist) ----------

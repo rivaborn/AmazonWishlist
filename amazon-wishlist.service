@@ -8,6 +8,9 @@ User=wishlist
 Group=wishlist
 WorkingDirectory=/opt/amazon-wishlist
 Environment="WISHLIST_PORT=9060"
+Environment="PLAYWRIGHT_BROWSERS_PATH=/opt/amazon-wishlist/.cache/playwright"
+Environment="HOME=/opt/amazon-wishlist"
+Environment="XDG_RUNTIME_DIR=/tmp/runtime-wishlist"
 ExecStart=/opt/amazon-wishlist/.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 9060
 Restart=on-failure
 RestartSec=5
@@ -17,7 +20,7 @@ NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
-ReadWritePaths=/opt/amazon-wishlist/data
+ReadWritePaths=/opt/amazon-wishlist/data /opt/amazon-wishlist/.cache
 
 [Install]
 WantedBy=multi-user.target

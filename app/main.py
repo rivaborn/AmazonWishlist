@@ -6,6 +6,7 @@ from fastapi.staticfiles import StaticFiles
 
 from .db import init_db
 from .routes import api as api_routes
+from .routes import login as login_routes
 from .routes import pages as page_routes
 from .scheduler import start_scheduler, stop_scheduler
 
@@ -29,3 +30,4 @@ app.mount(
 )
 app.include_router(page_routes.router)
 app.include_router(api_routes.router)
+app.include_router(login_routes.router)

@@ -1,0 +1,153 @@
+{% extends "base.html" %}
+{% block title %}Login{% endblock %}
+{% block content %}
+<h2>Amazon login</h2>
+
+<section id="login-status">
+  <p class="hint" id="status-line">Loading…</p>
+  {% if status.error %}
+    <p class="hint" style="color: var(--bad)">{{ status.error }}</p>
+  {% endif %}
+</section>
+
+<section id="login-controls">
+  <button id="start-btn" class="primary" type="button">Start login session</button>
+  <button id="save-btn"  class="primary" type="button" hidden>Save session</button>
+  <button id="cancel-btn"           type="button" hidden>Cancel</button>
+</section>
+
+<section id="vnc-wrap" hidden>
+  <iframe id="vnc-frame" title="Amazon login (noVNC)"
+          style="width: 100%; height: 720px; border: 1px solid var(--border); border-radius: 6px; background: black;"></iframe>
+  <p class="hint">
+    Sign in to your <strong>secondary</strong> Amazon account in the embedded browser.
+    Complete any 2FA / new-device verification. When the homepage loads, click
+    <strong>Save session</strong>.
+  </p>
+</section>
+
+<section>
+  <h3>What this does</h3>
+  <p class="hint">
+    The server runs a real Chromium under a virtual display (Xvfb) and streams
+    it here via noVNC. When you save, the server exports the session cookies
+    to <code>data/storage_state.json</code> and the daily scraper switches to
+    that logged-in session — bypassing the IP-throttling we hit while
+    scraping anonymously.
+  </p>
+  <p class="hint">
+    <strong>Don't</strong> log into your primary Amazon account from this tab.
+    Use a separate, throwaway account with a different email / phone / payment
+    method. See README for the safety rationale.
+  </p>
+</section>
+
+<script>
+(function () {
+  const VNC_PORT = {{ status.vnc_port }};
+  const start = document.getElementById('start-btn');
+  const save  = document.getElementById('save-btn');
+  const cancel = document.getElementById('cancel-btn');
+  const wrap  = document.getElementById('vnc-wrap');
+  const frame = document.getElementById('vnc-frame');
+  const statusLine = document.getElementById('status-line');
+
+  function fmtAge(sec) {
+    if (sec == null) return '—';
+    if (sec < 60) return sec + 's';
+    if (sec < 3600) return Math.floor(sec / 60) + 'm';
+    if (sec < 86400) return Math.floor(sec / 3600) + 'h';
+    return Math.floor(sec / 86400) + 'd';
+  }
+
+  function render(s) {
+    if (s.running) {
+      start.hidden = true;
+      save.hidden = false;
+      cancel.hidden = false;
+      wrap.hidden = false;
+      const target = `http://${location.hostname}:${VNC_PORT}/vnc.html?autoconnect=1&resize=remote&path=websockify&token=${encodeURIComponent(s.token || '')}`;
+      if (frame.dataset.target !== target) {
+        frame.dataset.target = target;
+        frame.src = target;
+      }
+      statusLine.textContent = `Login session active. Idle timeout: ${fmtAge(s.idle_timeout_sec)}.`;
+    } else {
+      start.hidden = false;
+      save.hidden = true;
+      cancel.hidden = true;
+      wrap.hidden = true;
+      frame.removeAttribute('src');
+      frame.dataset.target = '';
+      if (s.saved_storage_state_at) {
+        statusLine.textContent =
+          `Logged in. Session file age: ${fmtAge(s.saved_storage_state_age_sec)} ` +
+          `(saved ${s.saved_storage_state_at}).`;
+      } else {
+        statusLine.textContent = 'No saved session. Click "Start login session".';
+      }
+    }
+  }
+
+  async function fetchStatus() {
+    const r = await fetch('/api/login/status');
+    return r.json();
+  }
+
+  async function poll() {
+    while (true) {
+      const s = await fetchStatus();
+      render(s);
+      // While a session is running, poll every 5s and send a heartbeat so the
+      // watchdog doesn't kill us due to inactivity.
+      if (s.running) {
+        await fetch('/api/login/heartbeat', { method: 'POST' });
+        await new Promise(r => setTimeout(r, 5000));
+      } else {
+        await new Promise(r => setTimeout(r, 4000));
+      }
+    }
+  }
+
+  start.addEventListener('click', async () => {
+    start.disabled = true;
+    start.textContent = 'Starting…';
+    try {
+      const r = await fetch('/api/login/start', { method: 'POST' });
+      const j = await r.json();
+      render(j);
+    } catch (e) {
+      alert('Start failed: ' + e);
+    } finally {
+      start.disabled = false;
+      start.textContent = 'Start login session';
+    }
+  });
+
+  save.addEventListener('click', async () => {
+    if (!confirm('Save the current session and tear down the embedded browser?')) return;
+    save.disabled = true;
+    save.textContent = 'Saving…';
+    try {
+      const r = await fetch('/api/login/save', { method: 'POST' });
+      const j = await r.json();
+      render(j);
+    } catch (e) {
+      alert('Save failed: ' + e);
+    } finally {
+      save.disabled = false;
+      save.textContent = 'Save session';
+    }
+  });
+
+  cancel.addEventListener('click', async () => {
+    if (!confirm('Cancel the login session without saving?')) return;
+    const r = await fetch('/api/login/cancel', { method: 'POST' });
+    const j = await r.json();
+    render(j);
+  });
+
+  poll();
+})();
+</script>
+{% endblock %}

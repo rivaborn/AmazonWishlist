@@ -117,6 +117,8 @@ def main() -> int:
         "/no-price",
         "/price-drops",
         "/wishlists",
+        "/login",
+        "/api/login/status",
         "/deals?min_dollar=2&min_pct=20&basis=list",
     ]
     with TestClient(app) as c:

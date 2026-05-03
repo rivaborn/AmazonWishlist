@@ -83,6 +83,12 @@ class FetchFailed(Exception):
     — the previous wishlist_book membership and last_scraped_at stay intact."""
 
 
+class LoginExpired(Exception):
+    """Raised by the Playwright scraper when it detects the saved storage state
+    no longer represents a logged-in Amazon session. Caller should stop the
+    run, surface a 're-authenticate' message, and leave wishlist_book intact."""
+
+
 def _polite_sleep() -> None:
     time.sleep(random.uniform(REQUEST_DELAY_MIN, REQUEST_DELAY_MAX))
 
