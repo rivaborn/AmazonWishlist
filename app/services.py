@@ -11,7 +11,7 @@ from typing import Literal, Optional
 from .config import SCRAPE_PER_WISHLIST_SECONDS
 from .db import connect
 from .models import BookRow, ScrapedItem
-from .scraper import BotDetected, fetch_wishlist
+from .scraper import BotDetected, FetchFailed, fetch_wishlist
 
 log = logging.getLogger(__name__)
 
@@ -174,8 +174,16 @@ def run_full_scrape() -> dict[str, int]:
             try:
                 items = fetch_wishlist(w["url"], list_label=label)
             except BotDetected as e:
+                # Don't ingest — preserve previous count + timestamp.
                 last_error = f"bot-blocked: {label}"
                 log.warning("Bot-blocked on wishlist %s: %s", w["id"], e)
+                counts[w["url"]] = 0
+                with _progress_lock:
+                    _progress["done"] += 1
+            except FetchFailed as e:
+                # Same: HTTP/network failure on first page — keep prior state.
+                last_error = f"fetch-failed: {label}: {e}"
+                log.warning("Fetch failed on wishlist %s: %s", w["id"], e)
                 counts[w["url"]] = 0
                 with _progress_lock:
                     _progress["done"] += 1

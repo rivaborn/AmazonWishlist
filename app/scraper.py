@@ -77,6 +77,12 @@ class BotDetected(Exception):
     """Raised when Amazon's anti-bot stub is served instead of a wishlist."""
 
 
+class FetchFailed(Exception):
+    """Raised when the first wishlist page can't be fetched at all (HTTP error,
+    network error, etc.). Callers should NOT ingest an empty list in this case
+    — the previous wishlist_book membership and last_scraped_at stay intact."""
+
+
 def _polite_sleep() -> None:
     time.sleep(random.uniform(REQUEST_DELAY_MIN, REQUEST_DELAY_MAX))
 
@@ -266,18 +272,32 @@ def fetch_wishlist(url: str, *, list_label: str = "wishlist") -> list[ScrapedIte
             page_count += 1
 
             log.info("Fetching wishlist page %d: %s", page_count, next_url)
-            resp = _get(client, next_url)
+            # Any non-success response at any point during pagination raises
+            # rather than silently truncating. Partial ingest would replace
+            # the wishlist's full membership with whatever we managed to
+            # parse before the error, wiping items the wishlist still has.
+            try:
+                resp = _get(client, next_url)
+            except httpx.HTTPError as e:
+                log.warning("Wishlist page %d network error: %s", page_count, e)
+                raise FetchFailed(
+                    f"network error on page {page_count} of {url} (had {len(items)} items so far): {e}"
+                ) from e
             body = resp.text
             if resp.status_code >= 400:
-                log.warning("Wishlist page returned HTTP %s", resp.status_code)
-                _save_diagnostic(f"{list_label}_p{page_count}_http{resp.status_code}", next_url, body)
-                break
+                path = _save_diagnostic(f"{list_label}_p{page_count}_http{resp.status_code}", next_url, body)
+                raise FetchFailed(
+                    f"HTTP {resp.status_code} on page {page_count} of {url} "
+                    f"(had {len(items)} items so far); saved {path}"
+                )
             if _is_antibot_stub(body):
                 path = _save_diagnostic(f"{list_label}_p{page_count}_antibot", next_url, body)
                 log.warning("Anti-bot stub on page %d (saved %s)", page_count, path)
                 if page_count == 1:
                     raise BotDetected(f"anti-bot stub on first page of {url}")
-                break
+                raise FetchFailed(
+                    f"anti-bot stub on page {page_count} of {url} (had {len(items)} items so far)"
+                )
 
             tree = HTMLParser(body)
             rows = tree.css('li[data-itemId], li[data-reposition-action-params]')
