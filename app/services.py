@@ -80,6 +80,7 @@ def list_wishlists() -> list[dict]:
             """
             SELECT
                 w.id, w.url, w.label, w.added_at, w.last_scraped_at,
+                w.previous_item_count,
                 (SELECT COUNT(*) FROM wishlist_book wb WHERE wb.wishlist_id = w.id) AS last_item_count
             FROM wishlist w
             ORDER BY w.added_at
@@ -102,6 +103,14 @@ def ingest_wishlist(wishlist_id: int, items: list[ScrapedItem]) -> None:
     with connect() as conn:
         conn.execute("BEGIN")
         try:
+            prev_count = conn.execute(
+                "SELECT COUNT(*) FROM wishlist_book WHERE wishlist_id = ?",
+                (wishlist_id,),
+            ).fetchone()[0]
+            conn.execute(
+                "UPDATE wishlist SET previous_item_count = ? WHERE id = ?",
+                (prev_count, wishlist_id),
+            )
             conn.execute(
                 "DELETE FROM wishlist_book WHERE wishlist_id = ?", (wishlist_id,)
             )
@@ -329,15 +338,23 @@ prev AS (
         )
         GROUP BY asin
     ) p ON p.asin = s.asin AND p.max_t = s.observed_at
+),
+high AS (
+    SELECT asin, MAX(current_price_cents) AS highest_price_cents
+    FROM price_snapshot
+    WHERE current_price_cents IS NOT NULL
+    GROUP BY asin
 )
 SELECT DISTINCT
     b.asin, b.title, b.author, b.product_url, b.purchased,
     l.current_price_cents, l.list_price_cents, l.availability, l.observed_at,
-    pr.prev_price_cents
+    pr.prev_price_cents,
+    h.highest_price_cents
 FROM latest l
 JOIN book b ON b.asin = l.asin
 JOIN wishlist_book wb ON wb.asin = l.asin
 LEFT JOIN prev pr ON pr.asin = l.asin
+LEFT JOIN high h ON h.asin = l.asin
 """
 
 
@@ -367,6 +384,7 @@ def _row_to_book(row, basis: Basis) -> BookRow:
         drop_dollar=drop_dollar,
         drop_pct=drop_pct,
         purchased=bool(_row_get(row, "purchased")),
+        highest_price_cents=_row_get(row, "highest_price_cents"),
     )
 
 

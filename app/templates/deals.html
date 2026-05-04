@@ -14,6 +14,7 @@
       <th class="cb-col"></th>
       <th>Title</th><th>Author</th><th>Now</th>
       <th>{{ 'Prev' if basis == 'prev' else 'List' }}</th>
+      <th>Highest</th>
       <th>Drop $</th><th>Drop %</th><th>Seen</th>
     </tr>
   </thead>
@@ -28,6 +29,7 @@
         {% set base = r.prev_price_cents if basis == 'prev' else r.list_price_cents %}
         {{ '$%.2f' % (base / 100) if base is not none else '—' }}
       </td>
+      <td>{{ '$%.2f' % (r.highest_price_cents / 100) if r.highest_price_cents is not none else '—' }}</td>
       <td>${{ '%.2f' % r.drop_dollar }}</td>
       <td>{{ '%.0f' % r.drop_pct }}%</td>
       <td class="ts">{{ r.observed_at }}</td>

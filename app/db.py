@@ -5,11 +5,12 @@ from .config import DB_PATH
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS wishlist (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    url             TEXT    NOT NULL UNIQUE,
-    label           TEXT,
-    added_at        TEXT    NOT NULL,
-    last_scraped_at TEXT
+    id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+    url                  TEXT    NOT NULL UNIQUE,
+    label                TEXT,
+    added_at             TEXT    NOT NULL,
+    last_scraped_at      TEXT,
+    previous_item_count  INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS book (
@@ -57,6 +58,9 @@ def _migrate(conn) -> None:
     book_cols = {r[1] for r in conn.execute("PRAGMA table_info(book)").fetchall()}
     if "purchased" not in book_cols:
         conn.execute("ALTER TABLE book ADD COLUMN purchased INTEGER NOT NULL DEFAULT 0")
+
+    if "previous_item_count" not in cols:
+        conn.execute("ALTER TABLE wishlist ADD COLUMN previous_item_count INTEGER")
 
 
 @contextmanager

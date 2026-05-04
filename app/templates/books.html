@@ -17,7 +17,7 @@
   <thead>
     <tr>
       <th class="cb-col"></th>
-      <th>Title</th><th>Author</th><th>Price</th><th>List</th><th>Last seen</th>
+      <th>Title</th><th>Author</th><th>Price</th><th>List</th><th>Highest</th><th>Last seen</th>
     </tr>
   </thead>
   <tbody>
@@ -28,6 +28,7 @@
       <td>{{ r.author or '' }}</td>
       <td>${{ '%.2f' % (r.current_price_cents / 100) }}</td>
       <td>{{ '$%.2f' % (r.list_price_cents / 100) if r.list_price_cents is not none else '—' }}</td>
+      <td>{{ '$%.2f' % (r.highest_price_cents / 100) if r.highest_price_cents is not none else '—' }}</td>
       <td class="ts">{{ r.observed_at }}</td>
     </tr>
   {% endfor %}

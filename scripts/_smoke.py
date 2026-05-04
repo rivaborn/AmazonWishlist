@@ -97,12 +97,17 @@ def main() -> int:
     assert rows[0]["last_scraped_at"] is not None, rows
     # day2 had two items: one available, one kindle_unavailable -> wishlist_book has 2
     assert rows[0]["last_item_count"] == 2, rows
+    # previous_item_count = membership count captured before day2 ingest = 2 (from day1)
+    assert rows[0]["previous_item_count"] == 2, rows
 
     # All-books view: only the available one with a price; summary shows it
     books, summary = all_books_by_price()
     assert len(books) == 1 and books[0].asin == "B0FAKE0001", books
     assert summary["count"] == 1
     assert summary["min_cents"] == 499 and summary["max_cents"] == 499, summary
+    # Highest price reflects MAX across all snapshots: day1 was 999, day2 was 499
+    assert books[0].highest_price_cents == 999, books[0]
+    assert d_prev[0].highest_price_cents == 999, d_prev[0]
     # progress snapshot is callable and shape-stable
     snap = get_progress()
     for k in ("running", "started_at", "finished_at", "total", "done",

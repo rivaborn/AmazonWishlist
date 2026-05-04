@@ -37,3 +37,4 @@ class BookRow:
     drop_dollar: Optional[float] = None
     drop_pct: Optional[float] = None
     purchased: bool = False
+    highest_price_cents: Optional[int] = None

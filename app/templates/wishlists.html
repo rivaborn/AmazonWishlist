@@ -23,15 +23,19 @@
     <p class="empty">No wishlists yet.</p>
   {% else %}
   <table>
-    <thead><tr><th>Label</th><th>URL</th><th>Added</th><th>Last scraped</th><th>Items</th><th></th></tr></thead>
+    <thead><tr><th>Label</th><th>URL</th><th>Added</th><th>Last scraped</th><th>Previous</th><th>Current Items</th><th></th></tr></thead>
     <tbody>
       {% for w in wishlists %}
+      {% set prev = w.previous_item_count %}
+      {% set cur = w.last_item_count %}
+      {% set abnormal = prev is not none and prev > 0 and cur is not none and (cur < prev * 0.8 or cur > prev * 1.5) %}
       <tr>
         <td>{{ w.label or '—' }}</td>
         <td><a href="{{ w.url }}" target="_blank" rel="noopener">{{ w.url }}</a></td>
         <td class="ts">{{ w.added_at }}</td>
         <td class="ts">{{ w.last_scraped_at or '—' }}</td>
-        <td>{{ w.last_item_count if w.last_scraped_at else '—' }}</td>
+        <td>{{ prev if prev is not none else '—' }}</td>
+        <td{% if abnormal %} class="abnormal" title="Differs from previous by &gt;20% — possible scrape problem"{% endif %}>{{ cur if w.last_scraped_at else '—' }}</td>
         <td>
           <form method="post" action="/api/wishlists/{{ w.id }}/delete" style="display:inline">
             <button type="submit" class="danger">Remove</button>
