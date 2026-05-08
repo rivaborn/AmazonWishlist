@@ -145,6 +145,54 @@ sudo systemctl restart amazon-wishlist
 
 Next scrape will log `Scraper path: httpx` and behave as before. Move the file back to switch on again.
 
+## Troubleshooting (production)
+
+### `ModuleNotFoundError: No module named 'uvicorn'` after a system restart
+
+**Cause:** The system Python was upgraded (e.g. 3.13 → 3.14) while the venv was already built. The venv's `python3` symlink now resolves to the new interpreter, which looks for packages under `python3.14/site-packages/` while everything is installed under `python3.13/site-packages/`.
+
+**Fix:** Delete the stale venv and re-run the install script (the script only creates a new venv if one doesn't exist, so you must delete it first):
+
+```bash
+sudo rm -rf /opt/amazon-wishlist/.venv
+sudo bash ~/AmazonWishlist/scripts/install_systemd.sh
+```
+
+---
+
+### `ERROR: Playwright does not support chromium on ubuntu<version>-x64`
+
+**Cause:** `install_systemd.sh` runs `playwright install --with-deps chromium`. If the Ubuntu version is newer than what the installed Playwright release officially lists (e.g. Ubuntu 26.04 with Playwright 1.59.x), the install fails with the error above. The Linux x64 binary is identical across Ubuntu 22/24/26 — the block is purely an OS-version check.
+
+**Fix (step 1):** Install the browser binary with the platform override, bypassing the OS check:
+
+```bash
+sudo bash -c "
+PLAYWRIGHT_HOST_PLATFORM_OVERRIDE=ubuntu24.04-x64 \
+PLAYWRIGHT_BROWSERS_PATH=/opt/amazon-wishlist/.cache/playwright \
+  /opt/amazon-wishlist/.venv/bin/python -m playwright install chromium-headless-shell \
+&& chown -R wishlist:wishlist /opt/amazon-wishlist/.cache/playwright
+"
+```
+
+**Fix (step 2):** The override must also be present when the service launches Playwright at scrape time. `amazon-wishlist.service` in this repo already includes:
+
+```
+Environment="PLAYWRIGHT_HOST_PLATFORM_OVERRIDE=ubuntu24.04-x64"
+```
+
+If the service file in `/etc/systemd/system/` predates this fix, copy it in:
+
+```bash
+sudo install -m 644 ~/AmazonWishlist/amazon-wishlist.service /etc/systemd/system/amazon-wishlist.service
+sudo systemctl daemon-reload
+sudo systemctl restart amazon-wishlist
+```
+
+Future `install_systemd.sh` runs copy the service file from the repo, so they will carry the override forward automatically.
+
+---
+
 ## Scrape progress / status API
 
 Two JSON endpoints back the wishlists page UI and can be polled by anything else:

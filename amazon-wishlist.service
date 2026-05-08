@@ -9,6 +9,7 @@ Group=wishlist
 WorkingDirectory=/opt/amazon-wishlist
 Environment="WISHLIST_PORT=9060"
 Environment="PLAYWRIGHT_BROWSERS_PATH=/opt/amazon-wishlist/.cache/playwright"
+Environment="PLAYWRIGHT_HOST_PLATFORM_OVERRIDE=ubuntu24.04-x64"
 Environment="HOME=/opt/amazon-wishlist"
 Environment="XDG_RUNTIME_DIR=/tmp/runtime-wishlist"
 ExecStart=/opt/amazon-wishlist/.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 9060
