@@ -24,8 +24,12 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
   xvfb x11vnc websockify novnc
 
 mkdir -p "$APP_DIR"
+# NOTE: .cache MUST be excluded — it holds the Playwright chromium browser, which
+# lives only in $APP_DIR (never in the repo). Without this exclude, `--delete`
+# wipes the browser on every deploy, and on Ubuntu versions newer than the
+# installed Playwright supports the reinstall below can't put it back.
 rsync -a --delete \
-  --exclude=".git" --exclude=".venv" --exclude="data" --exclude="__pycache__" \
+  --exclude=".git" --exclude=".venv" --exclude="data" --exclude=".cache" --exclude="__pycache__" \
   "$REPO_DIR"/ "$APP_DIR"/
 mkdir -p "$APP_DIR/data"
 
@@ -40,14 +44,29 @@ fi
 "$APP_DIR/.venv/bin/pip" install --upgrade pip
 "$APP_DIR/.venv/bin/pip" install -r "$APP_DIR/requirements.txt"
 
-# Playwright browser binary (chromium) + its system runtime deps. Cache lives
-# under the app dir so the `wishlist` system user can read it under systemd
-# hardening. `--with-deps` picks the right apt packages for this Ubuntu rev
-# (libatk-bridge, libnss3, libxkbcommon, etc.) so we don't have to maintain a
-# hand-rolled list that drifts.
+# Playwright browser binary (chromium). Cache lives under the app dir so the
+# `wishlist` system user can read it under systemd hardening.
+#
+# On Ubuntu releases newer than the installed Playwright officially lists, the
+# install fails an OS-version gate even though the Linux x64 binary is fine. We
+# set PLAYWRIGHT_HOST_PLATFORM_OVERRIDE so it treats the host as a supported
+# release, try `--with-deps` first (installs the apt runtime libs on a fresh
+# box), then fall back to a binary-only install, and finally tolerate a failure
+# entirely — the browser is usually already cached, and a missing browser only
+# degrades the scraper to the anonymous httpx path rather than breaking startup.
+# Crucially, this step must never abort the deploy: the service restart below
+# is what ships the new code.
 export PLAYWRIGHT_BROWSERS_PATH="$APP_DIR/.cache/playwright"
+export PLAYWRIGHT_HOST_PLATFORM_OVERRIDE="${PLAYWRIGHT_HOST_PLATFORM_OVERRIDE:-ubuntu24.04-x64}"
 mkdir -p "$PLAYWRIGHT_BROWSERS_PATH"
-"$APP_DIR/.venv/bin/python" -m playwright install --with-deps chromium
+PW="$APP_DIR/.venv/bin/python -m playwright install"
+if ! $PW --with-deps chromium; then
+  echo "playwright '--with-deps chromium' failed (OS-version gate?); retrying binary-only" >&2
+  if ! $PW chromium; then
+    echo "WARNING: could not install the chromium browser; the scraper will fall " >&2
+    echo "         back to the anonymous httpx path until it is installed manually." >&2
+  fi
+fi
 
 # Ensure the directories the service writes to exist with the right owner.
 mkdir -p "$APP_DIR/data/.chrome-login" "$APP_DIR/data/diagnostics"

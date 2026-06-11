@@ -9,6 +9,9 @@ from pathlib import Path
 _tmp = Path(tempfile.mkdtemp(prefix="wishlist-smoke-"))
 os.environ["WISHLIST_DB"] = str(_tmp / "test.db")
 os.environ["WISHLIST_LOG"] = str(_tmp / "test.log")
+# Throwaway progress file too, so the app's startup resume-check can't pick up a
+# real interrupted run and kick off a live scrape during the test.
+os.environ["WISHLIST_PROGRESS"] = str(_tmp / "progress.json")
 
 from fastapi.testclient import TestClient
 

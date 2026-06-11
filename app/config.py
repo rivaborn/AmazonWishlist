@@ -8,6 +8,15 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 DB_PATH = Path(os.environ.get("WISHLIST_DB", DATA_DIR / "wishlist.db"))
 LOG_PATH = Path(os.environ.get("WISHLIST_LOG", DATA_DIR / "scrape.log"))
 
+# Scrape progress is mirrored to this file on every step so an interrupted run
+# (e.g. the service restarted mid-scrape by an OS security upgrade via
+# needrestart) can be detected and resumed on the next startup.
+PROGRESS_PATH = Path(os.environ.get("WISHLIST_PROGRESS", DATA_DIR / "scrape_progress.json"))
+
+# Don't auto-resume an interrupted run older than this (seconds). Guards against
+# resuming a stale run after a long outage; the daily cron covers that instead.
+RESUME_MAX_AGE_SEC = int(os.environ.get("WISHLIST_RESUME_MAX_AGE", str(24 * 3600)))
+
 PORT = int(os.environ.get("WISHLIST_PORT", "9060"))
 
 SCRAPE_HOUR = int(os.environ.get("WISHLIST_SCRAPE_HOUR", "3"))

@@ -90,6 +90,8 @@ Set in `amazon-wishlist.service` under `Environment=` if you need to override.
 | `WISHLIST_SCRAPE_HOUR` | `3` | daily cron hour (server local) |
 | `WISHLIST_SCRAPE_MINUTE` | `0` | daily cron minute |
 | `WISHLIST_PER_LIST_SECONDS` | `3600` | minimum seconds between starting one wishlist and the next during a single run. Set to `0` to disable pacing for one-off testing. |
+| `WISHLIST_PROGRESS` | `data/scrape_progress.json` | scrape progress is mirrored here on every step; on startup an interrupted run is resumed from it (see "Resume after restart" below) |
+| `WISHLIST_RESUME_MAX_AGE` | `86400` | max age (seconds) of an interrupted run that will be auto-resumed on startup; older ones are discarded and left for the next daily cron |
 | `WISHLIST_DELAY_MIN` / `WISHLIST_DELAY_MAX` | `4.0` / `9.0` | jittered delay between page-level requests within a single wishlist scrape, seconds |
 | `WISHLIST_TIMEOUT` | `20` | per-request HTTP timeout, seconds |
 | `WISHLIST_USER_AGENT` | recent Chrome | UA string sent to Amazon |
@@ -217,6 +219,16 @@ Two JSON endpoints back the wishlists page UI and can be polled by anything else
   ```
 
   When `waiting` is `true`, the run is mid-pacing-gap and `next_starts_at` is the ISO timestamp the next wishlist will start.
+
+  (The status JSON also carries `run_id`, `pending_ids`, and `last_started_at` — internal resume bookkeeping; safe to ignore.)
+
+## Resume after restart
+
+A full scrape takes hours (one wishlist per `WISHLIST_PER_LIST_SECONDS`, default 1h). The daily run therefore overlaps `apt-daily-upgrade`, and a security upgrade to a library the service links (e.g. `openssl`/`libssl`) makes `needrestart` **restart the service mid-scrape**, which would otherwise abandon the run until the next 03:00 cron and leave some wishlists on stale data.
+
+To survive that, progress is persisted to `WISHLIST_PROGRESS` (`data/scrape_progress.json`) on every step — including the remaining-wishlist queue (`pending_ids`) and the wall-clock start of the last wishlist (so the per-list pacing gap is honoured across a restart). On startup the app checks that file: if a run was interrupted (queue still non-empty) and is younger than `WISHLIST_RESUME_MAX_AGE`, it resumes in the background, scraping **only** the wishlists that hadn't completed. A normal finish drains the queue, and a login-expiry abort clears it, so neither triggers a spurious resume.
+
+This is best-effort, not a mitigation of the restart itself: if you'd rather the scrape not be interrupted at all, exclude this unit from `needrestart` (`/etc/needrestart/conf.d/`) or move the `apt-daily-upgrade.timer` outside your scrape window.
 
 ## Data model
 

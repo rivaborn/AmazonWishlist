@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import logging
+import os
 import threading
 import time
 from datetime import datetime, timedelta
@@ -11,6 +13,8 @@ from typing import Literal, Optional
 from .config import (
     CHROMIUM_USER_DATA_DIR,
     PLAYWRIGHT_HEADLESS,
+    PROGRESS_PATH,
+    RESUME_MAX_AGE_SEC,
     SCRAPE_PER_WISHLIST_SECONDS,
     STORAGE_STATE,
     use_playwright,
@@ -39,6 +43,16 @@ _progress: dict = {
     "error": None,
     "waiting": False,
     "next_starts_at": None,
+    # ---- resume bookkeeping (persisted; not part of the public API contract) ----
+    # run_id          identifies a single full-scrape run
+    # pending_ids     wishlist ids not yet processed in the current run; the only
+    #                 field that stays non-empty after an abrupt death, so it's
+    #                 our "this run was interrupted" signal on the next startup
+    # last_started_at wall-clock ISO of when the most recent wishlist scrape began,
+    #                 used to re-derive pacing across a restart (monotonic resets)
+    "run_id": None,
+    "pending_ids": [],
+    "last_started_at": None,
 }
 
 
@@ -47,9 +61,34 @@ def get_progress() -> dict:
         return dict(_progress)
 
 
+def _persist_progress_locked() -> None:
+    """Atomically mirror `_progress` to disk. Caller must hold `_progress_lock`."""
+    try:
+        tmp = PROGRESS_PATH.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(_progress), encoding="utf-8")
+        os.replace(tmp, PROGRESS_PATH)
+    except OSError:
+        log.exception("Failed to persist scrape progress to %s", PROGRESS_PATH)
+
+
 def _progress_update(**kwargs) -> None:
     with _progress_lock:
         _progress.update(kwargs)
+        _persist_progress_locked()
+
+
+def _complete_wishlist(wishlist_id: int, items_added: int = 0) -> None:
+    """Mark one wishlist done in the current run: advance counters and drop it
+    from the pending queue, then persist. Called for both successful ingests and
+    handled failures (a bot-block/fetch-failure still 'consumes' the slot)."""
+    with _progress_lock:
+        _progress["done"] += 1
+        _progress["items_total"] += items_added
+        try:
+            _progress["pending_ids"].remove(wishlist_id)
+        except ValueError:
+            pass
+        _persist_progress_locked()
 
 
 def _now() -> str:
@@ -151,27 +190,58 @@ def ingest_wishlist(wishlist_id: int, items: list[ScrapedItem]) -> None:
             raise
 
 
-def run_full_scrape() -> dict[str, int]:
+def run_full_scrape(resume: bool = False) -> dict[str, int]:
     """Scrape every registered wishlist; return per-wishlist item counts.
 
-    Updates the in-memory progress snapshot at every step so the UI can poll.
+    Progress is persisted to disk at every step so an interrupted run (e.g. the
+    service restarted by an OS library upgrade) can be picked up by
+    `resume_if_interrupted()` on the next startup. Pacing is anchored on
+    wall-clock `last_started_at` so the one-wishlist-per-interval rule survives a
+    restart (a monotonic clock resets to zero with the new process).
+
+    `resume=True` continues the current persisted run, scraping only the
+    wishlists still in `pending_ids` and preserving the already-done count and
+    pacing. A fresh call (`resume=False`) starts a new run over every wishlist.
+
     Idempotent against concurrent calls only via the API guard
     (`POST /api/scrape/run` rejects if `running` is True).
     """
-    wishlists = list_wishlists()
     interval = max(0, SCRAPE_PER_WISHLIST_SECONDS)
+
+    if resume and (_progress.get("pending_ids") or []):
+        run_id = _progress.get("run_id") or _now()
+        pending_ids = list(_progress.get("pending_ids") or [])
+        started_at = _progress.get("started_at") or _now()
+        done = int(_progress.get("done") or 0)
+        items_total = int(_progress.get("items_total") or 0)
+        total = int(_progress.get("total") or (done + len(pending_ids)))
+        last_started_at = _progress.get("last_started_at")
+        log.info("Resuming scrape run %s: %d of %d wishlist(s) remaining",
+                 run_id, len(pending_ids), total)
+    else:
+        run_id = _now()
+        started_at = run_id
+        pending_ids = [w["id"] for w in list_wishlists()]
+        done = 0
+        items_total = 0
+        total = len(pending_ids)
+        last_started_at = None
+
     _progress_update(
         running=True,
-        started_at=_now(),
+        run_id=run_id,
+        started_at=started_at,
         finished_at=None,
-        total=len(wishlists),
-        done=0,
+        total=total,
+        done=done,
         current_label=None,
         current_url=None,
-        items_total=0,
+        items_total=items_total,
         error=None,
         waiting=False,
         next_starts_at=None,
+        pending_ids=pending_ids,
+        last_started_at=last_started_at,
     )
     counts: dict[str, int] = {}
     last_error: Optional[str] = None
@@ -183,14 +253,47 @@ def run_full_scrape() -> dict[str, int]:
     log.info("Scraper path: %s", "playwright" if pw_ctx is not None else "httpx")
 
     try:
-        for idx, w in enumerate(wishlists):
-            wishlist_started = time.monotonic()
+        # Resolve the pending ids to current wishlist rows in their original
+        # order, skipping any deleted since the run started.
+        by_id = {w["id"]: w for w in list_wishlists()}
+        work = [by_id[i] for i in pending_ids if i in by_id]
+
+        for w in work:
+            # Pace: ensure >= `interval` seconds since the previous wishlist
+            # START. Measured on wall-clock so the gap is honoured even if the
+            # service was restarted mid-wait.
+            if interval > 0 and last_started_at:
+                try:
+                    target = datetime.fromisoformat(last_started_at) + timedelta(seconds=interval)
+                except ValueError:
+                    target = None
+                if target is not None:
+                    wait_seconds = (target - datetime.now()).total_seconds()
+                    if wait_seconds > 0:
+                        next_at = target.isoformat(timespec="seconds")
+                        log.info("Waiting %ds before next wishlist (until %s)",
+                                 int(wait_seconds), next_at)
+                        _progress_update(
+                            waiting=True,
+                            current_label=f"Waiting until {next_at[11:19]} for next wishlist",
+                            next_starts_at=next_at,
+                        )
+                        # Sleep in slices so the progress endpoint stays fresh.
+                        end = time.monotonic() + wait_seconds
+                        while True:
+                            remaining = end - time.monotonic()
+                            if remaining <= 0:
+                                break
+                            time.sleep(min(remaining, 5.0))
+
+            last_started_at = _now()
             label = w.get("label") or w["url"]
             _progress_update(
                 current_label=label,
                 current_url=w["url"],
                 waiting=False,
                 next_starts_at=None,
+                last_started_at=last_started_at,
             )
             log.info("Scraping wishlist %s (%s)", w["id"], w["url"])
             try:
@@ -205,62 +308,35 @@ def run_full_scrape() -> dict[str, int]:
                 last_error = "login expired — open Login tab and re-authenticate"
                 log.warning("Login expired on wishlist %s: %s", w["id"], e)
                 counts[w["url"]] = 0
-                with _progress_lock:
-                    _progress["done"] += 1
-                # No point continuing once the saved session is dead.
+                # No point continuing once the saved session is dead. Clear the
+                # queue so we don't auto-resume into the same dead session on the
+                # next restart — the daily cron will retry with a fresh run.
+                _progress_update(pending_ids=[])
                 break
             except BotDetected as e:
                 # Don't ingest — preserve previous count + timestamp.
                 last_error = f"bot-blocked: {label}"
                 log.warning("Bot-blocked on wishlist %s: %s", w["id"], e)
                 counts[w["url"]] = 0
-                with _progress_lock:
-                    _progress["done"] += 1
+                _complete_wishlist(w["id"])
             except FetchFailed as e:
                 # Same: HTTP/network failure on first page — keep prior state.
                 last_error = f"fetch-failed: {label}: {e}"
                 log.warning("Fetch failed on wishlist %s: %s", w["id"], e)
                 counts[w["url"]] = 0
-                with _progress_lock:
-                    _progress["done"] += 1
+                _complete_wishlist(w["id"])
             except Exception as e:
                 last_error = f"scrape failed: {label}: {e}"
                 log.exception("Scrape failed for %s: %s", w["url"], e)
                 counts[w["url"]] = 0
-                with _progress_lock:
-                    _progress["done"] += 1
+                _complete_wishlist(w["id"])
             else:
                 ingest_wishlist(w["id"], items)
                 _mark_scraped(w["id"])
                 counts[w["url"]] = len(items)
                 log.info("Ingested %d items for wishlist %s", len(items), w["id"])
-                with _progress_lock:
-                    _progress["done"] += 1
-                    _progress["items_total"] += len(items)
+                _complete_wishlist(w["id"], items_added=len(items))
 
-            # Pace: at most one wishlist start per `interval` seconds.
-            is_last = idx == len(wishlists) - 1
-            if not is_last and interval > 0:
-                wait_seconds = (wishlist_started + interval) - time.monotonic()
-                if wait_seconds > 0:
-                    next_at = (
-                        datetime.now() + timedelta(seconds=wait_seconds)
-                    ).isoformat(timespec="seconds")
-                    log.info("Waiting %ds before next wishlist (until %s)",
-                             int(wait_seconds), next_at)
-                    _progress_update(
-                        waiting=True,
-                        current_label=f"Waiting until {next_at[11:19]} for next wishlist",
-                        next_starts_at=next_at,
-                    )
-                    # Sleep in slices so the progress endpoint stays fresh
-                    # if the dict shape ever changes mid-wait.
-                    end = time.monotonic() + wait_seconds
-                    while True:
-                        remaining = end - time.monotonic()
-                        if remaining <= 0:
-                            break
-                        time.sleep(min(remaining, 5.0))
         if last_error:
             _progress_update(error=last_error)
     except Exception as e:
@@ -289,6 +365,57 @@ def run_full_scrape() -> dict[str, int]:
             next_starts_at=None,
         )
     return counts
+
+
+def resume_if_interrupted() -> None:
+    """On startup, re-launch a scrape that a restart killed mid-run.
+
+    The signal is a persisted run with a non-empty `pending_ids` queue: that
+    only survives an abrupt process death (a normal finish drains the queue, and
+    a login-expiry giving up clears it). Stale runs past RESUME_MAX_AGE_SEC are
+    discarded — the daily cron covers those.
+    """
+    _load_progress()
+    with _progress_lock:
+        pending = list(_progress.get("pending_ids") or [])
+        started_at = _progress.get("started_at")
+    if not pending:
+        return
+
+    try:
+        age = (datetime.now() - datetime.fromisoformat(started_at)).total_seconds()
+    except (TypeError, ValueError):
+        age = float("inf")
+    if age > RESUME_MAX_AGE_SEC:
+        log.warning("Discarding stale interrupted scrape (age %.0fs, %d pending)",
+                    age, len(pending))
+        _progress_update(running=False, pending_ids=[], waiting=False)
+        return
+
+    log.info("Found interrupted scrape with %d wishlist(s) pending; resuming", len(pending))
+    threading.Thread(
+        target=lambda: run_full_scrape(resume=True),
+        name="scrape-resume",
+        daemon=True,
+    ).start()
+
+
+def _load_progress() -> None:
+    """Load persisted progress into `_progress` (best-effort) so a restart can
+    see whether the previous run finished, and the status endpoint reflects it."""
+    try:
+        if not PROGRESS_PATH.is_file():
+            return
+        data = json.loads(PROGRESS_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        log.exception("Failed to load persisted scrape progress from %s", PROGRESS_PATH)
+        return
+    if not isinstance(data, dict):
+        return
+    with _progress_lock:
+        for k in _progress:
+            if k in data:
+                _progress[k] = data[k]
 
 
 def _open_playwright_context_or_none() -> Optional[dict]:
