@@ -94,6 +94,10 @@ Set in `amazon-wishlist.service` under `Environment=` if you need to override.
 | `WISHLIST_RESUME_MAX_AGE` | `86400` | max age (seconds) of an interrupted run that will be auto-resumed on startup; older ones are discarded and left for the next daily cron |
 | `WISHLIST_DELAY_MIN` / `WISHLIST_DELAY_MAX` | `4.0` / `9.0` | jittered delay between page-level requests within a single wishlist scrape, seconds |
 | `WISHLIST_TIMEOUT` | `20` | per-request HTTP timeout, seconds |
+| `WISHLIST_MAX_PAGES` | `100` | hard cap on pages fetched per wishlist. Reaching it while Amazon still offers a next page is treated as **partial pagination** and raises `FetchFailed` — the result is a prefix, and ingesting a prefix would replace the whole membership with it. |
+| `WISHLIST_MAX_STALE_PAGES` | `3` | stop paginating after this many consecutive pages that add no new ASINs. Amazon keeps minting fresh `paginationToken`s past the end of a list, each re-serving rows already held, so "no next link" never arrives on its own — this is the real end-of-list signal. |
+| `WISHLIST_SHRINK_FLOOR` | `0.8` | refuse to replace a wishlist's membership when a scrape returns less than this fraction of the stored count. A shrink confirmed by a second consecutive short scrape is accepted. |
+| `WISHLIST_STALE_AFTER_HOURS` | `26` | a wishlist whose last **successful** scrape is older than this is flagged stale on `/wishlists`. 26 rather than 24 because one-list-per-hour pacing already spreads a run across ~7 h. |
 | `WISHLIST_USER_AGENT` | recent Chrome | UA string sent to Amazon |
 | `WISHLIST_STORAGE_STATE` | `data/storage_state.json` | Playwright session file. Presence flips the scraper to authenticated mode automatically. |
 | `WISHLIST_PLAYWRIGHT_HEADLESS` | `1` | Headless mode for the *scrape* (login is always headful). Set to `0` to debug. |
@@ -234,7 +238,8 @@ This is best-effort, not a mitigation of the restart itself: if you'd rather the
 
 SQLite, file at `data/wishlist.db`. Schema is created/migrated on startup.
 
-- `wishlist` — registered URLs (`url`, `label`, `added_at`, `last_scraped_at`).
+- `wishlist` — registered URLs (`url`, `label`, `added_at`, `last_scraped_at`, `previous_item_count`, `pending_shrink_count`).
+  `previous_item_count` is the membership count captured immediately *before* the latest ingest, so on a healthy run it matches the current count — that pair is a scrape-size sanity check, **not** a record of what changed on the wishlist. `pending_shrink_count` holds a short scrape that was refused (see `WISHLIST_SHRINK_FLOOR`) and is cleared by the next normal one.
 - `book` — one row per ASIN ever seen (`title`, `author`, `product_url`, `first_seen`, `last_seen`).
 - `wishlist_book` — many-to-many; rebuilt for a wishlist on each successful scrape, so removing an item from your Amazon wishlist drops it off `/deals` etc. but keeps its history.
 - `price_snapshot` — append-only `(asin, observed_at, current_price_cents, list_price_cents, availability)`.
@@ -244,5 +249,6 @@ SQLite, file at `data/wishlist.db`. Schema is created/migrated on startup.
 ## Notes / limitations
 
 - Amazon actively rate-limits scrapers. The defaults (3 AM start, 1-hour pacing, 4–9 s per-page jitter, browser-like headers) are tuned to fly under the radar for accounts with a handful of wishlists totaling around 1,000 items. Larger accounts or noisier IPs may still see occasional bot-blocks; the app preserves the prior state when this happens and saves the offending HTML to `data/diagnostics/`.
+- **A failed scrape leaves every count untouched, on purpose** ("never clobber good data"), so a wishlist that has been bot-blocked for days still shows a matching Previous/Current pair on `/wishlists` and looks perfectly healthy. `last_scraped_at` is the only column that moves — it is flagged **stale** past `WISHLIST_STALE_AFTER_HOURS`. Read the age, not the counts.
 - Amazon's HTML structure changes occasionally. If scrapes start returning 0 items *without* a "bot-blocked" status, check `data/diagnostics/` for the saved HTML and update the selectors in `app/scraper.py`.
 - This is a single-user app; there is no auth on the web UI. Don't expose it to the public internet without a reverse proxy + auth in front.

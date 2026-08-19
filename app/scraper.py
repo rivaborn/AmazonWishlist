@@ -29,6 +29,8 @@ from selectolax.parser import HTMLParser
 
 from .config import (
     DATA_DIR,
+    MAX_PAGES_PER_WISHLIST,
+    MAX_STALE_PAGES,
     REQUEST_DELAY_MAX,
     REQUEST_DELAY_MIN,
     REQUEST_TIMEOUT,
@@ -220,6 +222,23 @@ def _next_page_url(html: str, root: str, current_url: str) -> Optional[str]:
     return None
 
 
+def _check_pagination_complete(
+    url: str, page_count: int, next_url: Optional[str], item_count: int
+) -> None:
+    """Raise if we stopped on the page budget instead of on end-of-list.
+
+    Both scrapers call this once the loop exits. A still-live `next_url` at the
+    cap means there was more list than budget, so what we hold is a prefix --
+    and ingesting a prefix replaces the wishlist's whole membership with it.
+    Partial pagination is a failure, not a truncation (see CLAUDE.md).
+    """
+    if next_url and page_count >= MAX_PAGES_PER_WISHLIST:
+        raise FetchFailed(
+            f"page cap ({MAX_PAGES_PER_WISHLIST}) reached on {url} with more pages "
+            f"still offered (had {item_count} items) -- result would be partial"
+        )
+
+
 def _refine_no_price_item(client: httpx.Client, item: ScrapedItem) -> ScrapedItem:
     """For items lacking a price, GET the product page to refine availability."""
     try:
@@ -271,7 +290,9 @@ def fetch_wishlist(url: str, *, list_label: str = "wishlist") -> list[ScrapedIte
         page_count = 0
         seen_urls: set[str] = set()
 
-        while next_url and page_count < 100:  # hard safety cap
+        stale_pages = 0
+
+        while next_url and page_count < MAX_PAGES_PER_WISHLIST:
             if next_url in seen_urls:
                 break
             seen_urls.add(next_url)
@@ -318,12 +339,29 @@ def fetch_wishlist(url: str, *, list_label: str = "wishlist") -> list[ScrapedIte
                      page_count, new_count, len(items), len(rows))
 
             if new_count == 0:
-                path = _save_diagnostic(f"{list_label}_p{page_count}_zero", next_url, body)
-                log.warning("Zero items parsed on page %d; saved HTML to %s", page_count, path)
+                stale_pages += 1
+                # Only a page with no ROWS AT ALL is a selector problem worth a
+                # diagnostic; a page of rows we already hold is just Amazon
+                # paginating past the end of the list.
+                if not rows:
+                    path = _save_diagnostic(f"{list_label}_p{page_count}_zero", next_url, body)
+                    log.warning("Zero rows on page %d; saved HTML to %s", page_count, path)
+                if stale_pages >= MAX_STALE_PAGES:
+                    log.info(
+                        "Stopping at page %d: %d consecutive pages added nothing new "
+                        "(end of list, %d items)",
+                        page_count, stale_pages, len(items),
+                    )
+                    next_url = None
+                    break
+            else:
+                stale_pages = 0
 
             next_url = _next_page_url(body, root, next_url)
             if next_url:
                 _polite_sleep()
+
+        _check_pagination_complete(url, page_count, next_url, len(items))
 
         # Refine items that came back without a price (only if we got SOMETHING
         # — if every page hit anti-bot, don't hammer product pages too).

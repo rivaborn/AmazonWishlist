@@ -37,6 +37,36 @@ REQUEST_DELAY_MIN = float(os.environ.get("WISHLIST_DELAY_MIN", "4.0"))
 REQUEST_DELAY_MAX = float(os.environ.get("WISHLIST_DELAY_MAX", "9.0"))
 REQUEST_TIMEOUT = float(os.environ.get("WISHLIST_TIMEOUT", "20"))
 
+# ---------- Pagination bounds (see scraper._paginate_bounds) ----------
+
+# Hard cap on pages fetched for a single wishlist. Reaching it means we stopped
+# because we ran out of budget, not because Amazon ran out of list -- which is
+# partial pagination, so the scrapers raise FetchFailed rather than ingest a
+# possibly-truncated set.
+MAX_PAGES_PER_WISHLIST = int(os.environ.get("WISHLIST_MAX_PAGES", "100"))
+
+# Amazon keeps minting fresh `paginationToken`s past the end of a wishlist, each
+# re-serving rows we already hold, so "no next link" never arrives and the
+# dedupe-by-ASIN quietly absorbs the repeats. Stop after this many consecutive
+# pages that add nothing new: that is the real end-of-list signal. Without it a
+# 520-item list burns all 100 pages every night -- ~75 of them pure duplicates,
+# which is request volume spent buying anti-bot blocks.
+MAX_STALE_PAGES = int(os.environ.get("WISHLIST_MAX_STALE_PAGES", "3"))
+
+# ---------- Ingest guards ----------
+
+# Refuse to replace a wishlist's membership when a scrape comes back with less
+# than this fraction of the previous count -- one short scrape wipes the missing
+# items until the next good run. A shrink confirmed by a SECOND consecutive
+# short scrape is accepted (a list really can be pruned), so nothing strands.
+INGEST_SHRINK_FLOOR = float(os.environ.get("WISHLIST_SHRINK_FLOOR", "0.8"))
+
+# A wishlist whose last successful scrape is older than this reads as stale in
+# the UI. Scrape failures deliberately leave `previous_item_count` and the item
+# count untouched, so a blocked list keeps showing a healthy matching pair --
+# `last_scraped_at` is the only honest column, and this makes it say so.
+STALE_AFTER_HOURS = float(os.environ.get("WISHLIST_STALE_AFTER_HOURS", "26"))
+
 # ---------- Playwright (logged-in scrape via secondary Amazon account) ----------
 
 STORAGE_STATE = Path(os.environ.get("WISHLIST_STORAGE_STATE", DATA_DIR / "storage_state.json"))

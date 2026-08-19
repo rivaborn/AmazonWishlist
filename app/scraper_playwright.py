@@ -21,13 +21,19 @@ from typing import Optional, TYPE_CHECKING
 
 from selectolax.parser import HTMLParser
 
-from .config import REQUEST_DELAY_MAX, REQUEST_DELAY_MIN
+from .config import (
+    MAX_PAGES_PER_WISHLIST,
+    MAX_STALE_PAGES,
+    REQUEST_DELAY_MAX,
+    REQUEST_DELAY_MIN,
+)
 from .models import ScrapedItem
 from .scraper import (
     BotDetected,
     FetchFailed,
     LoginExpired,
     _amazon_root,
+    _check_pagination_complete,
     _is_antibot_stub,
     _parse_item_row,
     _save_diagnostic,
@@ -91,8 +97,9 @@ def fetch_wishlist_playwright(
         next_url: Optional[str] = url
         page_count = 0
         seen_urls: set[str] = set()
+        stale_pages = 0
 
-        while next_url and page_count < 100:
+        while next_url and page_count < MAX_PAGES_PER_WISHLIST:
             if next_url in seen_urls:
                 break
             seen_urls.add(next_url)
@@ -151,21 +158,39 @@ def fetch_wishlist_playwright(
                 page_count, new_count, len(items), len(rows),
             )
 
-            if new_count == 0 and len(rows) == 0:
-                path = _save_diagnostic(
-                    f"{list_label}_p{page_count}_zero_pw", next_url, page.content()
-                )
-                if page_count == 1:
-                    # First page yielded nothing and isn't an anti-bot/logged-out
-                    # — selector drift or genuinely empty list. Don't ingest.
-                    raise FetchFailed(
-                        f"first page of {url} yielded zero rows; saved {path}"
+            if new_count == 0:
+                stale_pages += 1
+                if len(rows) == 0:
+                    path = _save_diagnostic(
+                        f"{list_label}_p{page_count}_zero_pw", next_url, page.content()
                     )
+                    if page_count == 1:
+                        # First page yielded nothing and isn't an anti-bot/logged-out
+                        # — selector drift or genuinely empty list. Don't ingest.
+                        raise FetchFailed(
+                            f"first page of {url} yielded zero rows; saved {path}"
+                        )
+                if stale_pages >= MAX_STALE_PAGES:
+                    # Amazon hands out a fresh paginationToken indefinitely, each
+                    # re-serving rows we already hold, so `next_url` never dries
+                    # up on its own and `seen_urls` never matches. Consecutive
+                    # pages adding nothing is the real end-of-list signal.
+                    log.info(
+                        "Stopping at page %d (PW): %d consecutive pages added nothing "
+                        "new (end of list, %d items)",
+                        page_count, stale_pages, len(items),
+                    )
+                    next_url = None
+                    break
+            else:
+                stale_pages = 0
 
             next_url = _next_page_url(page.content(), root, next_url)
             if next_url:
                 _polite_sleep()
     finally:
         page.close()
+
+    _check_pagination_complete(url, page_count, next_url, len(items))
 
     return list(items.values())

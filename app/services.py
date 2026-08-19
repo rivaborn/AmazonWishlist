@@ -12,10 +12,12 @@ from typing import Literal, Optional
 
 from .config import (
     CHROMIUM_USER_DATA_DIR,
+    INGEST_SHRINK_FLOOR,
     PLAYWRIGHT_HEADLESS,
     PROGRESS_PATH,
     RESUME_MAX_AGE_SEC,
     SCRAPE_PER_WISHLIST_SECONDS,
+    STALE_AFTER_HOURS,
     STORAGE_STATE,
     use_playwright,
 )
@@ -26,6 +28,22 @@ from .scraper import BotDetected, FetchFailed, LoginExpired, fetch_wishlist
 log = logging.getLogger(__name__)
 
 Basis = Literal["prev", "list"]
+
+
+class SuspiciousShrink(Exception):
+    """A scrape came back too short to be trusted, so it was not ingested.
+
+    `ingest_wishlist` replaces a wishlist's membership wholesale, so a scrape
+    that ends early -- pagination stopping short without ever erroring -- silently
+    drops every item it missed. That has happened for real: 2026-08-10 list 5
+    ingested 320 of 554, 2026-08-12 list 7 ingested 170 of 407, each wiping the
+    remainder for a day. The old 0.8x check lived only in the wishlists template,
+    so it coloured the row red *after* the data was already gone.
+
+    Refusing once and accepting a shrink that a second consecutive scrape agrees
+    with is what keeps this a guard rather than a trap: a list the owner really
+    did prune returns to normal within a day instead of stranding.
+    """
 
 
 # ---------- in-memory scrape progress (single-process app) ----------
@@ -114,18 +132,41 @@ def remove_wishlist(wishlist_id: int) -> None:
 
 
 def list_wishlists() -> list[dict]:
+    """Every wishlist plus its current size and how stale its last scrape is.
+
+    `stale_hours` / `stale` are derived here rather than in the template because
+    they are the only honest health signal on that page. A failed scrape leaves
+    `previous_item_count`, the membership count and `last_scraped_at` all
+    untouched by design ("never clobber good data"), so a list that has been
+    bot-blocked for days still renders a perfectly matched Previous/Current
+    pair. Age is the one column that moves.
+    """
     with connect() as conn:
         rows = conn.execute(
             """
             SELECT
                 w.id, w.url, w.label, w.added_at, w.last_scraped_at,
-                w.previous_item_count,
+                w.previous_item_count, w.pending_shrink_count,
                 (SELECT COUNT(*) FROM wishlist_book wb WHERE wb.wishlist_id = w.id) AS last_item_count
             FROM wishlist w
             ORDER BY w.added_at
             """
         ).fetchall()
-        return [dict(r) for r in rows]
+
+    now = datetime.now()
+    out = []
+    for r in rows:
+        d = dict(r)
+        hours = None
+        if d.get("last_scraped_at"):
+            try:
+                hours = (now - datetime.fromisoformat(d["last_scraped_at"])).total_seconds() / 3600.0
+            except (TypeError, ValueError):
+                hours = None
+        d["stale_hours"] = hours
+        d["stale"] = hours is not None and hours > STALE_AFTER_HOURS
+        out.append(d)
+    return out
 
 
 def _mark_scraped(wishlist_id: int) -> None:
@@ -137,17 +178,54 @@ def _mark_scraped(wishlist_id: int) -> None:
 
 
 def ingest_wishlist(wishlist_id: int, items: list[ScrapedItem]) -> None:
-    """Replace the wishlist's membership and append a price snapshot per item."""
+    """Replace the wishlist's membership and append a price snapshot per item.
+
+    Raises `SuspiciousShrink` — before touching anything — if `items` is below
+    `INGEST_SHRINK_FLOOR` of the count already stored, unless the previous scrape
+    was refused for the same reason (see the class docstring).
+    """
     now = _now()
+    new_count = len(items)
     with connect() as conn:
+        # Decided BEFORE opening the transaction: the refusal path has to leave a
+        # marker behind, and a rejection is not a rollback.
+        row = conn.execute(
+            """
+            SELECT
+                (SELECT COUNT(*) FROM wishlist_book wb WHERE wb.wishlist_id = w.id) AS prev_count,
+                w.pending_shrink_count
+            FROM wishlist w WHERE w.id = ?
+            """,
+            (wishlist_id,),
+        ).fetchone()
+        prev_count = row["prev_count"] if row else 0
+        pending_shrink = row["pending_shrink_count"] if row else None
+        short = prev_count > 0 and new_count < prev_count * INGEST_SHRINK_FLOOR
+
+        if short and pending_shrink is None:
+            # First short scrape: record it and keep the existing membership. A
+            # real prune shows up again on the next run and is accepted then.
+            conn.execute(
+                "UPDATE wishlist SET pending_shrink_count = ? WHERE id = ?",
+                (new_count, wishlist_id),
+            )
+            raise SuspiciousShrink(
+                f"{new_count} items vs {prev_count} stored "
+                f"({new_count / prev_count:.0%}, floor {INGEST_SHRINK_FLOOR:.0%}); "
+                f"membership kept - will accept if the next scrape agrees"
+            )
+        if short:
+            log.warning(
+                "Wishlist %s: accepting shrink to %d items (was %d) - confirmed by a "
+                "second consecutive short scrape (first refusal was %d)",
+                wishlist_id, new_count, prev_count, pending_shrink,
+            )
+
         conn.execute("BEGIN")
         try:
-            prev_count = conn.execute(
-                "SELECT COUNT(*) FROM wishlist_book WHERE wishlist_id = ?",
-                (wishlist_id,),
-            ).fetchone()[0]
             conn.execute(
-                "UPDATE wishlist SET previous_item_count = ? WHERE id = ?",
+                "UPDATE wishlist SET previous_item_count = ?, pending_shrink_count = NULL "
+                "WHERE id = ?",
                 (prev_count, wishlist_id),
             )
             conn.execute(
@@ -331,11 +409,21 @@ def run_full_scrape(resume: bool = False) -> dict[str, int]:
                 counts[w["url"]] = 0
                 _complete_wishlist(w["id"])
             else:
-                ingest_wishlist(w["id"], items)
-                _mark_scraped(w["id"])
-                counts[w["url"]] = len(items)
-                log.info("Ingested %d items for wishlist %s", len(items), w["id"])
-                _complete_wishlist(w["id"], items_added=len(items))
+                try:
+                    ingest_wishlist(w["id"], items)
+                except SuspiciousShrink as e:
+                    # Scrape "succeeded" but came back too short to trust. Same
+                    # contract as the fetch failures above: keep the prior state,
+                    # leave last_scraped_at alone so the row reads as stale.
+                    last_error = f"short-scrape refused: {label}: {e}"
+                    log.warning("Short scrape refused on wishlist %s: %s", w["id"], e)
+                    counts[w["url"]] = 0
+                    _complete_wishlist(w["id"])
+                else:
+                    _mark_scraped(w["id"])
+                    counts[w["url"]] = len(items)
+                    log.info("Ingested %d items for wishlist %s", len(items), w["id"])
+                    _complete_wishlist(w["id"], items_added=len(items))
 
         if last_error:
             _progress_update(error=last_error)

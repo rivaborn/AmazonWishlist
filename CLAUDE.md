@@ -52,7 +52,18 @@ A wishlist's membership (`wishlist_book`) is **replaced wholesale** inside `inge
 - `FetchFailed` — HTTP/network error, *or* anti-bot/zero-rows on a **later** page (partial pagination is treated as failure, not truncation).
 - `LoginExpired` — Playwright only; saved session is logged out. Aborts the whole run (no point continuing with a dead session).
 
+- `SuspiciousShrink` — raised by `ingest_wishlist()`, not by a scraper: the fetch succeeded but came back below `INGEST_SHRINK_FLOOR` (0.8) of the stored membership. Pagination can end early *without* erroring, and the ingest replaces membership wholesale, so a short-but-clean scrape silently drops everything it missed (2026-08-10: list 5 ingested 320 of 554; 2026-08-12: list 7 ingested 170 of 407). The first short scrape is refused and recorded in `wishlist.pending_shrink_count`; a **second consecutive** short scrape confirms the shrink is real and is accepted, so a genuinely pruned list recovers within a day instead of stranding. Any normal-sized scrape clears the marker.
+
 `run_full_scrape()` catches each, marks that wishlist's count 0, advances progress, and leaves the prior DB state intact. Any page yielding zero rows or the anti-bot stub gets its raw HTML dumped to `data/diagnostics/<timestamp>_<label>.html` for selector debugging. **If you touch the scrapers, preserve this: failures raise, successes return the full list.**
+
+⚠️ **The corollary nobody expects: a failed scrape makes the `/wishlists` row look healthier, not worse.** Preserving prior state means `previous_item_count`, the membership count *and* `last_scraped_at` all stay put, so a list bot-blocked for a week still renders a perfectly matched Previous/Current pair. Those two columns are a scrape-*size* sanity check, never a change log. The only column that moves is the age — hence the `stale` flag computed in `list_wishlists()`. Anything new that reports wishlist health must key off `stale_hours`, not off the counts.
+
+### Pagination: end-of-list is not "no next link"
+
+Amazon keeps issuing fresh `paginationToken`s well past the end of a wishlist, each re-serving rows already collected — so `_next_page_url()` never dries up, the `seen_urls` guard never matches (every token is unique), and dedupe-by-ASIN absorbs the repeats invisibly. Before this was fixed a 520-item list burned all 100 pages every night, ~75 of them pure duplicates; four lists doing that is ~300 wasted requests/day against a throwaway account, which is request budget spent buying anti-bot blocks. Two bounds, both in `config.py` and shared by **both** scrapers:
+
+- **`MAX_STALE_PAGES`** (3) — stop after N consecutive pages that add no new ASIN. This is the real end-of-list signal; the counter resets on any page that adds something.
+- **`MAX_PAGES_PER_WISHLIST`** (100) — the hard budget. Exiting on it *while a next page is still offered* means we hold a prefix, so `_check_pagination_complete()` (in `scraper.py`, imported by the Playwright path) raises `FetchFailed`. Reaching the cap is never a successful scrape.
 
 ### Pacing (anti-bot)
 

@@ -3,6 +3,7 @@ against a fake scraped payload (no network)."""
 import os
 import shutil
 import tempfile
+from datetime import datetime, timedelta
 from pathlib import Path
 
 # Use a throwaway DB
@@ -15,7 +16,7 @@ os.environ["WISHLIST_PROGRESS"] = str(_tmp / "progress.json")
 
 from fastapi.testclient import TestClient
 
-from app.db import init_db
+from app.db import connect, init_db
 from app.main import app
 from app.models import ScrapedItem
 from app.services import (
@@ -25,6 +26,13 @@ from app.services import (
     no_price_books,
     price_drop_history,
 )
+
+
+def _members(wishlist_id: int) -> int:
+    with connect() as conn:
+        return conn.execute(
+            "SELECT COUNT(*) FROM wishlist_book WHERE wishlist_id = ?", (wishlist_id,)
+        ).fetchone()[0]
 
 
 def main() -> int:
@@ -116,6 +124,77 @@ def main() -> int:
     for k in ("running", "started_at", "finished_at", "total", "done",
               "current_label", "current_url", "items_total", "error"):
         assert k in snap, snap
+
+    # ---- pagination: the cap is a failure, a natural end is not ----
+    from app.scraper import FetchFailed, _check_pagination_complete
+    from app.config import MAX_PAGES_PER_WISHLIST
+
+    # Stopped because Amazon offered no next page -> complete, no raise.
+    _check_pagination_complete("https://x/list", MAX_PAGES_PER_WISHLIST, None, 500)
+    # Stopped on the page budget with more pages still offered -> partial.
+    try:
+        _check_pagination_complete("https://x/list", MAX_PAGES_PER_WISHLIST, "https://x/p2", 500)
+    except FetchFailed:
+        pass
+    else:
+        raise AssertionError("hitting the page cap mid-list must raise FetchFailed")
+
+    # ---- ingest refuses a short scrape once, then accepts the confirmed shrink ----
+    from app.services import SuspiciousShrink
+    shrink_wid = add_wishlist("https://www.amazon.com/hz/wishlist/ls/FAKESHRINK", "shrink")
+    full = [
+        ScrapedItem(
+            asin=f"B0SHRINK{i:03d}",
+            title=f"Book {i}",
+            author=None,
+            product_url=f"https://www.amazon.com/dp/B0SHRINK{i:03d}",
+            current_price_cents=500 + i,
+            list_price_cents=None,
+            availability="available",
+        )
+        for i in range(100)
+    ]
+    ingest_wishlist(shrink_wid, full)
+    assert _members(shrink_wid) == 100
+
+    # 50 of 100 is under the 0.8 floor -> refused, membership untouched.
+    try:
+        ingest_wishlist(shrink_wid, full[:50])
+    except SuspiciousShrink:
+        pass
+    else:
+        raise AssertionError("a scrape at 50% of stored membership must be refused")
+    assert _members(shrink_wid) == 100, "refused scrape must not touch membership"
+
+    # A second short scrape confirms it -> accepted.
+    ingest_wishlist(shrink_wid, full[:50])
+    assert _members(shrink_wid) == 50, "a confirmed shrink must be accepted"
+
+    # A normal-sized scrape clears the marker, so the guard re-arms.
+    ingest_wishlist(shrink_wid, full[:50])
+    try:
+        ingest_wishlist(shrink_wid, full[:20])
+    except SuspiciousShrink:
+        pass
+    else:
+        raise AssertionError("guard must re-arm after a normal scrape")
+    assert _members(shrink_wid) == 50
+
+    # ---- staleness is derived and exposed ----
+    from app.config import STALE_AFTER_HOURS
+    fresh = [r for r in list_wishlists() if r["id"] == wid][0]
+    assert fresh["stale"] is False, fresh
+    assert fresh["stale_hours"] is not None and fresh["stale_hours"] < 1, fresh
+
+    old_ts = (datetime.now() - timedelta(hours=STALE_AFTER_HOURS + 12)).isoformat()
+    with connect() as conn:
+        conn.execute("UPDATE wishlist SET last_scraped_at = ? WHERE id = ?", (old_ts, wid))
+    stale_row = [r for r in list_wishlists() if r["id"] == wid][0]
+    assert stale_row["stale"] is True, stale_row
+    assert stale_row["stale_hours"] > STALE_AFTER_HOURS, stale_row
+    # The counts beside it are unchanged -- which is exactly why the flag exists.
+    assert stale_row["last_item_count"] == stale_row["previous_item_count"] == 2, stale_row
+    _mark_scraped(wid)
 
     # Hit every page through the HTTP layer
     paths = [
