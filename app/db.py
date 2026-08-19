@@ -63,9 +63,10 @@ def _migrate(conn) -> None:
     if "previous_item_count" not in cols:
         conn.execute("ALTER TABLE wishlist ADD COLUMN previous_item_count INTEGER")
 
-    # Records a suspiciously short scrape that `ingest_wishlist` refused. A
-    # second consecutive short scrape confirms the shrink is real and is let
-    # through; any normal-sized scrape clears it. See services.SuspiciousShrink.
+    # Records the item count of a suspiciously short scrape that
+    # `ingest_wishlist` refused. A second consecutive short scrape that AGREES
+    # with it confirms the shrink is real and is let through; a normal-sized
+    # scrape or a scrape failure clears it. See services.SuspiciousShrink.
     if "pending_shrink_count" not in cols:
         conn.execute("ALTER TABLE wishlist ADD COLUMN pending_shrink_count INTEGER")
 

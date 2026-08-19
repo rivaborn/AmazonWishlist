@@ -173,7 +173,12 @@ def purchased_page(
 
 @router.get("/wishlists")
 def wishlists_page(request: Request):
-    from ..config import SCRAPE_HOUR, SCRAPE_MINUTE, SCRAPE_PER_WISHLIST_SECONDS
+    from ..config import (
+        INGEST_SHRINK_FLOOR,
+        SCRAPE_HOUR,
+        SCRAPE_MINUTE,
+        SCRAPE_PER_WISHLIST_SECONDS,
+    )
     return templates.TemplateResponse(
         request,
         "wishlists.html",
@@ -182,5 +187,6 @@ def wishlists_page(request: Request):
             "active": "wishlists",
             "scrape_time": f"{SCRAPE_HOUR:02d}:{SCRAPE_MINUTE:02d}",
             "per_list_seconds": SCRAPE_PER_WISHLIST_SECONDS,
+            "shrink_floor": INGEST_SHRINK_FLOOR,
         },
     )

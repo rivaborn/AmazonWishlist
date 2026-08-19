@@ -28,7 +28,7 @@
       {% for w in wishlists %}
       {% set prev = w.previous_item_count %}
       {% set cur = w.last_item_count %}
-      {% set abnormal = prev is not none and prev > 0 and cur is not none and (cur < prev * 0.8 or cur > prev * 1.5) %}
+      {% set abnormal = prev is not none and prev > 0 and cur is not none and (cur < prev * shrink_floor or cur > prev * 1.5) %}
       {# A failed scrape leaves Previous and Current untouched, so a blocked list
          still shows a healthy matching pair. Age is the only column that moves. #}
       {% set stale = w.stale %}
@@ -36,11 +36,11 @@
         <td>{{ w.label or '—' }}</td>
         <td><a href="{{ w.url }}" target="_blank" rel="noopener">{{ w.url }}</a></td>
         <td class="ts">{{ w.added_at }}</td>
-        <td class="ts{% if stale %} stale{% endif %}"{% if stale %} title="Last successful scrape was {{ w.stale_hours | round | int }}h ago — the counts beside it are from then, not from today"{% endif %}>
+        <td class="ts{% if stale %} stale{% endif %}"{% if stale %} title="No successful scrape in {{ w.stale_hours | round | int }}h — the counts beside it are not from today"{% endif %}>
           {{ w.last_scraped_at or '—' }}{% if stale %} <span class="stale-badge">stale {{ w.stale_hours | round | int }}h</span>{% endif %}
         </td>
         <td>{{ prev if prev is not none else '—' }}</td>
-        <td{% if abnormal %} class="abnormal" title="Differs from previous by &gt;20% — possible scrape problem"{% elif stale %} class="stale" title="Not refreshed for {{ w.stale_hours | round | int }}h"{% endif %}>{{ cur if w.last_scraped_at else '—' }}</td>
+        <td{% if abnormal %} class="abnormal" title="Outside the expected range of the previous count — possible scrape problem"{% elif stale %} class="stale" title="Not refreshed for {{ w.stale_hours | round | int }}h"{% endif %}>{{ cur if w.last_scraped_at else '—' }}</td>
         <td>
           <form method="post" action="/api/wishlists/{{ w.id }}/delete" style="display:inline">
             <button type="submit" class="danger">Remove</button>

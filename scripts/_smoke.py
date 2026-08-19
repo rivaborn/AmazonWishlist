@@ -139,6 +139,30 @@ def main() -> int:
     else:
         raise AssertionError("hitting the page cap mid-list must raise FetchFailed")
 
+    # ---- end-of-list vs zero-rows: duplicates stop cleanly, empties fail ----
+    from app.scraper import _PaginationTracker
+    from app.config import MAX_STALE_PAGES
+
+    t = _PaginationTracker("https://x/list")
+    for i in range(MAX_STALE_PAGES - 1):
+        assert t.note_page(page_count=i + 2, new_count=0, row_count=10, item_count=100) is False
+    assert t.note_page(page_count=MAX_STALE_PAGES + 1, new_count=0, row_count=10, item_count=100) is True
+
+    t = _PaginationTracker("https://x/list")
+    try:
+        for i in range(MAX_STALE_PAGES):
+            t.note_page(page_count=i + 2, new_count=0, row_count=0, item_count=100)
+    except FetchFailed:
+        pass
+    else:
+        raise AssertionError("consecutive zero-row pages must raise FetchFailed")
+
+    # A page that adds something resets both counters.
+    t = _PaginationTracker("https://x/list")
+    t.note_page(page_count=2, new_count=0, row_count=0, item_count=100)
+    t.note_page(page_count=3, new_count=5, row_count=10, item_count=105)
+    assert t.empty_pages == 0 and t.stale_pages == 0
+
     # ---- ingest refuses a short scrape once, then accepts the confirmed shrink ----
     from app.services import SuspiciousShrink
     shrink_wid = add_wishlist("https://www.amazon.com/hz/wishlist/ls/FAKESHRINK", "shrink")
@@ -180,6 +204,19 @@ def main() -> int:
         raise AssertionError("guard must re-arm after a normal scrape")
     assert _members(shrink_wid) == 50
 
+    # A second short scrape that DISAGREES with the recorded one is refused
+    # again (two different truncation points are not a confirmation)...
+    try:
+        ingest_wishlist(shrink_wid, full[:35])  # short vs 50, disagrees with 20
+    except SuspiciousShrink:
+        pass
+    else:
+        raise AssertionError("a disagreeing second short scrape must be refused")
+    assert _members(shrink_wid) == 50
+    # ...and once two consecutive shorts agree, the shrink is accepted.
+    ingest_wishlist(shrink_wid, full[:35])
+    assert _members(shrink_wid) == 35, "an agreeing confirmed shrink must be accepted"
+
     # ---- staleness is derived and exposed ----
     from app.config import STALE_AFTER_HOURS
     fresh = [r for r in list_wishlists() if r["id"] == wid][0]
@@ -195,6 +232,14 @@ def main() -> int:
     # The counts beside it are unchanged -- which is exactly why the flag exists.
     assert stale_row["last_item_count"] == stale_row["previous_item_count"] == 2, stale_row
     _mark_scraped(wid)
+
+    # A wishlist never successfully scraped goes stale from its added_at.
+    never_wid = add_wishlist("https://www.amazon.com/hz/wishlist/ls/FAKENEVER", "never")
+    old_added = (datetime.now() - timedelta(hours=STALE_AFTER_HOURS + 5)).isoformat()
+    with connect() as conn:
+        conn.execute("UPDATE wishlist SET added_at = ? WHERE id = ?", (old_added, never_wid))
+    never_row = [r for r in list_wishlists() if r["id"] == never_wid][0]
+    assert never_row["last_scraped_at"] is None and never_row["stale"] is True, never_row
 
     # Hit every page through the HTTP layer
     paths = [

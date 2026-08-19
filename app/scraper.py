@@ -239,6 +239,61 @@ def _check_pagination_complete(
         )
 
 
+class _PaginationTracker:
+    """Decides when pagination has really ended. Shared by BOTH scrapers --
+    keep end-of-list policy here, not in the loops (CLAUDE.md's no-forking
+    rule).
+
+    Two counters, deliberately separate:
+
+    - ``stale_pages``: consecutive pages FULL of rows we already hold. That is
+      what Amazon's real end of list looks like -- it keeps minting fresh
+      paginationTokens past the last item, each re-serving collected rows --
+      so hitting MAX_STALE_PAGES is a clean stop.
+    - ``empty_pages``: consecutive pages with no item rows at all. End of list
+      never looks like that (end-of-list pages HAVE rows), so it is selector
+      drift or an unrecognized soft-block; hitting the same budget raises
+      FetchFailed rather than blessing a partial result (zero rows on a later
+      page is a failure, not a truncation). A single trailing empty page
+      usually carries no next token and ends the loop naturally first.
+
+    An empty page neither confirms nor denies end-of-list, so it does not
+    reset ``stale_pages``; any page that adds a new item resets both.
+    """
+
+    def __init__(self, url: str) -> None:
+        self.url = url
+        self.stale_pages = 0
+        self.empty_pages = 0
+
+    def note_page(
+        self, *, page_count: int, new_count: int, row_count: int, item_count: int
+    ) -> bool:
+        """Record one parsed page. True = stop cleanly (end of list reached)."""
+        if row_count == 0:
+            self.empty_pages += 1
+            if self.empty_pages >= MAX_STALE_PAGES:
+                raise FetchFailed(
+                    f"{self.empty_pages} consecutive pages with zero item rows on "
+                    f"{self.url} (had {item_count} items) -- soft-block or "
+                    f"selector drift, not end-of-list; result would be partial"
+                )
+            return False
+        self.empty_pages = 0
+        if new_count == 0:
+            self.stale_pages += 1
+            if self.stale_pages >= MAX_STALE_PAGES:
+                log.info(
+                    "Stopping at page %d: %d consecutive pages added nothing new "
+                    "(end of list, %d items)",
+                    page_count, self.stale_pages, item_count,
+                )
+                return True
+        else:
+            self.stale_pages = 0
+        return False
+
+
 def _refine_no_price_item(client: httpx.Client, item: ScrapedItem) -> ScrapedItem:
     """For items lacking a price, GET the product page to refine availability."""
     try:
@@ -289,11 +344,18 @@ def fetch_wishlist(url: str, *, list_label: str = "wishlist") -> list[ScrapedIte
         next_url: Optional[str] = url
         page_count = 0
         seen_urls: set[str] = set()
-
-        stale_pages = 0
+        tracker = _PaginationTracker(url)
 
         while next_url and page_count < MAX_PAGES_PER_WISHLIST:
             if next_url in seen_urls:
+                # Every observed paginationToken is unique, so this "never"
+                # fires; if it ever does we already hold every row that URL
+                # serves, so stopping is safe -- but leave a trace for the day
+                # Amazon's token semantics change.
+                log.warning(
+                    "Pagination URL repeated at page %d of %s -- treating as end of list",
+                    page_count, url,
+                )
                 break
             seen_urls.add(next_url)
             page_count += 1
@@ -338,24 +400,27 @@ def fetch_wishlist(url: str, *, list_label: str = "wishlist") -> list[ScrapedIte
             log.info("Page %d: parsed %d new items (cumulative %d, raw rows %d)",
                      page_count, new_count, len(items), len(rows))
 
-            if new_count == 0:
-                stale_pages += 1
-                # Only a page with no ROWS AT ALL is a selector problem worth a
-                # diagnostic; a page of rows we already hold is just Amazon
-                # paginating past the end of the list.
-                if not rows:
-                    path = _save_diagnostic(f"{list_label}_p{page_count}_zero", next_url, body)
-                    log.warning("Zero rows on page %d; saved HTML to %s", page_count, path)
-                if stale_pages >= MAX_STALE_PAGES:
-                    log.info(
-                        "Stopping at page %d: %d consecutive pages added nothing new "
-                        "(end of list, %d items)",
-                        page_count, stale_pages, len(items),
+            # Only a page with no ROWS AT ALL is a selector problem worth a
+            # diagnostic; a page of rows we already hold is just Amazon
+            # paginating past the end of the list.
+            if not rows:
+                path = _save_diagnostic(f"{list_label}_p{page_count}_zero", next_url, body)
+                log.warning("Zero rows on page %d; saved HTML to %s", page_count, path)
+                if page_count == 1:
+                    # First page yielded nothing and isn't an anti-bot stub --
+                    # selector drift or a genuinely empty list. Don't ingest
+                    # (same contract as the Playwright path).
+                    raise FetchFailed(
+                        f"first page of {url} yielded zero rows; saved {path}"
                     )
-                    next_url = None
-                    break
-            else:
-                stale_pages = 0
+            if tracker.note_page(
+                page_count=page_count, new_count=new_count,
+                row_count=len(rows), item_count=len(items),
+            ):
+                # `next_url = None` tells _check_pagination_complete below this
+                # exit was a natural end, not the page budget.
+                next_url = None
+                break
 
             next_url = _next_page_url(body, root, next_url)
             if next_url:

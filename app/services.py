@@ -139,7 +139,8 @@ def list_wishlists() -> list[dict]:
     `previous_item_count`, the membership count and `last_scraped_at` all
     untouched by design ("never clobber good data"), so a list that has been
     bot-blocked for days still renders a perfectly matched Previous/Current
-    pair. Age is the one column that moves.
+    pair. Age is the one column that moves. A never-scraped wishlist ages from
+    `added_at`, so it is not exempt.
     """
     with connect() as conn:
         rows = conn.execute(
@@ -157,10 +158,14 @@ def list_wishlists() -> list[dict]:
     out = []
     for r in rows:
         d = dict(r)
+        # A wishlist that has NEVER been scraped successfully ages from its
+        # added_at, so the unhealthiest row of all still goes stale instead of
+        # reading as clean forever.
+        basis = d.get("last_scraped_at") or d.get("added_at")
         hours = None
-        if d.get("last_scraped_at"):
+        if basis:
             try:
-                hours = (now - datetime.fromisoformat(d["last_scraped_at"])).total_seconds() / 3600.0
+                hours = (now - datetime.fromisoformat(basis)).total_seconds() / 3600.0
             except (TypeError, ValueError):
                 hours = None
         d["stale_hours"] = hours
@@ -177,12 +182,28 @@ def _mark_scraped(wishlist_id: int) -> None:
         )
 
 
+def _clear_pending_shrink(wishlist_id: int) -> None:
+    """A failed scrape breaks the shrink-confirmation chain.
+
+    `pending_shrink_count` means "the LAST completed scrape was suspiciously
+    short". A bot-block or fetch failure in between makes two short scrapes
+    non-consecutive, so the next short one must re-confirm from scratch rather
+    than being accepted against a days-old marker.
+    """
+    with connect() as conn:
+        conn.execute(
+            "UPDATE wishlist SET pending_shrink_count = NULL WHERE id = ?",
+            (wishlist_id,),
+        )
+
+
 def ingest_wishlist(wishlist_id: int, items: list[ScrapedItem]) -> None:
     """Replace the wishlist's membership and append a price snapshot per item.
 
     Raises `SuspiciousShrink` — before touching anything — if `items` is below
-    `INGEST_SHRINK_FLOOR` of the count already stored, unless the previous scrape
-    was refused for the same reason (see the class docstring).
+    `INGEST_SHRINK_FLOOR` of the count already stored, unless the previous
+    completed scrape was refused for the same reason AND the two short counts
+    agree (see the class docstring).
     """
     now = _now()
     new_count = len(items)
@@ -201,23 +222,36 @@ def ingest_wishlist(wishlist_id: int, items: list[ScrapedItem]) -> None:
         prev_count = row["prev_count"] if row else 0
         pending_shrink = row["pending_shrink_count"] if row else None
         short = prev_count > 0 and new_count < prev_count * INGEST_SHRINK_FLOOR
+        # Two short scrapes only confirm each other when they roughly AGREE on
+        # the new size (within the same floor ratio): two different truncation
+        # points are evidence of an unstable scrape, not of a real prune.
+        agrees = pending_shrink is not None and min(new_count, pending_shrink) >= (
+            max(new_count, pending_shrink) * INGEST_SHRINK_FLOOR
+        )
 
-        if short and pending_shrink is None:
-            # First short scrape: record it and keep the existing membership. A
-            # real prune shows up again on the next run and is accepted then.
+        if short and not agrees:
+            # Short and unconfirmed: record it and keep the existing membership.
+            # A real prune shows up again -- at the same size -- on the very
+            # next run and is accepted then. (A scrape failure in between
+            # clears the marker; see _clear_pending_shrink.)
             conn.execute(
                 "UPDATE wishlist SET pending_shrink_count = ? WHERE id = ?",
                 (new_count, wishlist_id),
             )
+            disagree = (
+                f"; previous short scrape saw {pending_shrink}, which does not agree"
+                if pending_shrink is not None
+                else ""
+            )
             raise SuspiciousShrink(
                 f"{new_count} items vs {prev_count} stored "
-                f"({new_count / prev_count:.0%}, floor {INGEST_SHRINK_FLOOR:.0%}); "
-                f"membership kept - will accept if the next scrape agrees"
+                f"({new_count / prev_count:.0%}, floor {INGEST_SHRINK_FLOOR:.0%})"
+                f"{disagree}; membership kept - will accept if the next scrape agrees"
             )
         if short:
             log.warning(
                 "Wishlist %s: accepting shrink to %d items (was %d) - confirmed by a "
-                "second consecutive short scrape (first refusal was %d)",
+                "second consecutive short scrape that agrees (first refusal saw %d)",
                 wishlist_id, new_count, prev_count, pending_shrink,
             )
 
@@ -386,27 +420,33 @@ def run_full_scrape(resume: bool = False) -> dict[str, int]:
                 last_error = "login expired — open Login tab and re-authenticate"
                 log.warning("Login expired on wishlist %s: %s", w["id"], e)
                 counts[w["url"]] = 0
+                _clear_pending_shrink(w["id"])
                 # No point continuing once the saved session is dead. Clear the
                 # queue so we don't auto-resume into the same dead session on the
                 # next restart — the daily cron will retry with a fresh run.
                 _progress_update(pending_ids=[])
                 break
             except BotDetected as e:
-                # Don't ingest — preserve previous count + timestamp.
+                # Don't ingest — preserve previous count + timestamp. Any
+                # failure also breaks the shrink-confirmation chain: a short
+                # scrape can only be confirmed by the VERY NEXT completed one.
                 last_error = f"bot-blocked: {label}"
                 log.warning("Bot-blocked on wishlist %s: %s", w["id"], e)
                 counts[w["url"]] = 0
+                _clear_pending_shrink(w["id"])
                 _complete_wishlist(w["id"])
             except FetchFailed as e:
                 # Same: HTTP/network failure on first page — keep prior state.
                 last_error = f"fetch-failed: {label}: {e}"
                 log.warning("Fetch failed on wishlist %s: %s", w["id"], e)
                 counts[w["url"]] = 0
+                _clear_pending_shrink(w["id"])
                 _complete_wishlist(w["id"])
             except Exception as e:
                 last_error = f"scrape failed: {label}: {e}"
                 log.exception("Scrape failed for %s: %s", w["url"], e)
                 counts[w["url"]] = 0
+                _clear_pending_shrink(w["id"])
                 _complete_wishlist(w["id"])
             else:
                 try:

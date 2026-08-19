@@ -32,6 +32,7 @@ from .scraper import (
     BotDetected,
     FetchFailed,
     LoginExpired,
+    _PaginationTracker,
     _amazon_root,
     _check_pagination_complete,
     _is_antibot_stub,
@@ -97,10 +98,18 @@ def fetch_wishlist_playwright(
         next_url: Optional[str] = url
         page_count = 0
         seen_urls: set[str] = set()
-        stale_pages = 0
+        tracker = _PaginationTracker(url)
 
         while next_url and page_count < MAX_PAGES_PER_WISHLIST:
             if next_url in seen_urls:
+                # Every observed paginationToken is unique, so this "never"
+                # fires; if it ever does we already hold every row that URL
+                # serves, so stopping is safe -- but leave a trace for the day
+                # Amazon's token semantics change.
+                log.warning(
+                    "Pagination URL repeated at page %d of %s -- treating as end of list",
+                    page_count, url,
+                )
                 break
             seen_urls.add(next_url)
             page_count += 1
@@ -158,32 +167,26 @@ def fetch_wishlist_playwright(
                 page_count, new_count, len(items), len(rows),
             )
 
-            if new_count == 0:
-                stale_pages += 1
-                if len(rows) == 0:
-                    path = _save_diagnostic(
-                        f"{list_label}_p{page_count}_zero_pw", next_url, page.content()
+            if len(rows) == 0:
+                path = _save_diagnostic(
+                    f"{list_label}_p{page_count}_zero_pw", next_url, page.content()
+                )
+                if page_count == 1:
+                    # First page yielded nothing and isn't an anti-bot/logged-out
+                    # — selector drift or genuinely empty list. Don't ingest.
+                    raise FetchFailed(
+                        f"first page of {url} yielded zero rows; saved {path}"
                     )
-                    if page_count == 1:
-                        # First page yielded nothing and isn't an anti-bot/logged-out
-                        # — selector drift or genuinely empty list. Don't ingest.
-                        raise FetchFailed(
-                            f"first page of {url} yielded zero rows; saved {path}"
-                        )
-                if stale_pages >= MAX_STALE_PAGES:
-                    # Amazon hands out a fresh paginationToken indefinitely, each
-                    # re-serving rows we already hold, so `next_url` never dries
-                    # up on its own and `seen_urls` never matches. Consecutive
-                    # pages adding nothing is the real end-of-list signal.
-                    log.info(
-                        "Stopping at page %d (PW): %d consecutive pages added nothing "
-                        "new (end of list, %d items)",
-                        page_count, stale_pages, len(items),
-                    )
-                    next_url = None
-                    break
-            else:
-                stale_pages = 0
+            # End-of-list vs zero-rows policy lives in _PaginationTracker
+            # (scraper.py) so the two scrapers cannot drift.
+            if tracker.note_page(
+                page_count=page_count, new_count=new_count,
+                row_count=len(rows), item_count=len(items),
+            ):
+                # `next_url = None` marks a natural end for the completeness
+                # check below, as opposed to exhausting the page budget.
+                next_url = None
+                break
 
             next_url = _next_page_url(page.content(), root, next_url)
             if next_url:
