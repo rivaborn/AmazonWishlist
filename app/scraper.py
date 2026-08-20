@@ -127,6 +127,44 @@ def _is_antibot_stub(body: str) -> bool:
     return any(n in body_lc for n in needles)
 
 
+def _is_amazon_error_page(body: str) -> bool:
+    """Detect Amazon's 503 "Dogs of Amazon" error page.
+
+    Served as a soft rate-limit distinct from the anti-automation stub: small
+    body, title "Sorry! Something went wrong!", `ref=cs_503_*` links and the
+    `500_503.png` hero image. It is NOT just noise -- an error page carries no
+    pagination token, so mid-list it makes pagination end looking exactly like
+    a natural end-of-list (that is what truncated wishlist 6 from 496 to 10 on
+    2026-08-19). Same size gate as the stub so a legitimate page that merely
+    mentions these strings cannot match.
+    """
+    if len(body) > 30_000:
+        return False
+    body_lc = body.lower()
+    needles = (
+        "ref=cs_503",
+        "500_503.png",
+        "sorry! something went wrong",
+    )
+    return any(n in body_lc for n in needles)
+
+
+def _classify_block_page(body: str) -> Optional[str]:
+    """Return the block-page kind ("antibot" | "error503") or None.
+
+    One chokepoint for both scrapers and the product-page refiner, so a newly
+    learned block shape is recognized everywhere at once.
+    """
+    if _is_antibot_stub(body):
+        return "antibot"
+    if _is_amazon_error_page(body):
+        return "error503"
+    return None
+
+
+_BLOCK_KIND_LABEL = {"antibot": "anti-bot stub", "error503": "Amazon 503 error page"}
+
+
 def _save_diagnostic(label: str, url: str, body: str) -> Path:
     DIAG_DIR.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%dT%H%M%S")
@@ -306,8 +344,8 @@ def _refine_no_price_item(client: httpx.Client, item: ScrapedItem) -> ScrapedIte
         return item
     if resp.status_code >= 400:
         return item
-    if _is_antibot_stub(resp.text):
-        # Don't poison item state from a blocked product fetch.
+    if _classify_block_page(resp.text):
+        # Don't poison item state from a blocked or errored product fetch.
         return item
 
     tree = HTMLParser(resp.text)
@@ -379,13 +417,15 @@ def fetch_wishlist(url: str, *, list_label: str = "wishlist") -> list[ScrapedIte
                     f"HTTP {resp.status_code} on page {page_count} of {url} "
                     f"(had {len(items)} items so far); saved {path}"
                 )
-            if _is_antibot_stub(body):
-                path = _save_diagnostic(f"{list_label}_p{page_count}_antibot", next_url, body)
-                log.warning("Anti-bot stub on page %d (saved %s)", page_count, path)
+            kind = _classify_block_page(body)
+            if kind:
+                what = _BLOCK_KIND_LABEL[kind]
+                path = _save_diagnostic(f"{list_label}_p{page_count}_{kind}", next_url, body)
+                log.warning("%s on page %d (saved %s)", what, page_count, path)
                 if page_count == 1:
-                    raise BotDetected(f"anti-bot stub on first page of {url}")
+                    raise BotDetected(f"{what} on first page of {url}")
                 raise FetchFailed(
-                    f"anti-bot stub on page {page_count} of {url} (had {len(items)} items so far)"
+                    f"{what} on page {page_count} of {url} (had {len(items)} items so far)"
                 )
 
             tree = HTMLParser(body)

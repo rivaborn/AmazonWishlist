@@ -163,6 +163,24 @@ def main() -> int:
     t.note_page(page_count=3, new_count=5, row_count=10, item_count=105)
     assert t.empty_pages == 0 and t.stale_pages == 0
 
+    # ---- block-page classifier: three shapes, three verdicts ----
+    from app.scraper import _classify_block_page
+
+    robot_stub = "<html><body>To discuss automated access to Amazon data please contact api-services-support@amazon.com.</body></html>"
+    dog_503 = (
+        "<html><head><title>Sorry! Something went wrong!</title></head><body>"
+        '<a href="/ref=cs_503_logo">Amazon.com</a>'
+        '<img src="https://images-na.ssl-images-amazon.com/images/G/01/error/500_503.png">'
+        "</body></html>"
+    )
+    benign_empty = "<html><body><ul id='g-items'></ul></body></html>"
+    huge_mention = "<html><body>" + ("x" * 40_000) + " ref=cs_503_link </body></html>"
+
+    assert _classify_block_page(robot_stub) == "antibot"
+    assert _classify_block_page(dog_503) == "error503"
+    assert _classify_block_page(benign_empty) is None, "empty end-of-list page must not classify as a block"
+    assert _classify_block_page(huge_mention) is None, "size gate must stop marker mentions in real pages"
+
     # ---- ingest refuses a short scrape once, then accepts the confirmed shrink ----
     from app.services import SuspiciousShrink
     shrink_wid = add_wishlist("https://www.amazon.com/hz/wishlist/ls/FAKESHRINK", "shrink")

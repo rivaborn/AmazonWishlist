@@ -48,7 +48,7 @@ Request/scrape flow, top to bottom:
 
 A wishlist's membership (`wishlist_book`) is **replaced wholesale** inside `ingest_wishlist()` only on a *successful* scrape. When a scrape fails, we must NOT ingest an empty/partial list, or we'd wipe items the wishlist still has. The scrapers encode this with three exception types raised instead of returning a short list:
 
-- `BotDetected` — Amazon's anti-automation stub on the **first** page (`_is_antibot_stub`: body < 30KB + captcha/automation marker).
+- `BotDetected` — a recognized block page on the **first** page. Two shapes, one chokepoint (`_classify_block_page`): the anti-automation stub (`_is_antibot_stub`: body < 30KB + captcha/automation marker) and Amazon's **503 "Dogs of Amazon" error page** (`_is_amazon_error_page`: `ref=cs_503`/`500_503.png`/"Sorry! Something went wrong!"). The 503 page is the sneaky one: it carries no pagination token, so unrecognized it makes pagination end mid-list looking exactly like a natural end-of-list — that forged end signal is what truncated wishlist 6 from 496 to 10 on 2026-08-19. Teach new block shapes to the classifier, not to the loops.
 - `FetchFailed` — HTTP/network error, *or* anti-bot/zero-rows on a **later** page (partial pagination is treated as failure, not truncation).
 - `LoginExpired` — Playwright only; saved session is logged out. Aborts the whole run (no point continuing with a dead session).
 
