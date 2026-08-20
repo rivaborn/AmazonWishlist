@@ -35,6 +35,7 @@ from .scraper import (
     LoginExpired,
     _PaginationTracker,
     _amazon_root,
+    _block_retry_delay,
     _check_pagination_complete,
     _classify_block_page,
     _parse_item_row,
@@ -116,41 +117,50 @@ def fetch_wishlist_playwright(
             page_count += 1
 
             log.info("Fetching wishlist page %d (Playwright): %s", page_count, next_url)
-            try:
-                resp = page.goto(next_url, wait_until="domcontentloaded", timeout=30_000)
-            except Exception as e:
-                raise FetchFailed(
-                    f"Playwright goto failed on page {page_count} of {url} "
-                    f"(had {len(items)} items so far): {e}"
-                ) from e
+            attempt = 0
+            while True:
+                try:
+                    resp = page.goto(next_url, wait_until="domcontentloaded", timeout=30_000)
+                except Exception as e:
+                    raise FetchFailed(
+                        f"Playwright goto failed on page {page_count} of {url} "
+                        f"(had {len(items)} items so far): {e}"
+                    ) from e
 
-            # Block detection — same content markers as the httpx path. Checked
-            # BEFORE the HTTP status so a 503 dog page on page 1 classifies as
-            # BotDetected (blocked) rather than a generic fetch failure.
-            body = page.content()
-            kind = _classify_block_page(body)
-            if kind:
+                # Block detection — same content markers as the httpx path.
+                # Checked BEFORE the HTTP status so a 503 dog page classifies
+                # (and retries) as a block rather than a generic fetch failure;
+                # retry policy is shared via _block_retry_delay.
+                body = page.content()
+                kind = _classify_block_page(body)
+                if kind is None:
+                    # HTTP-status backstop, mirroring the httpx path (which
+                    # refuses >= 400): an error body matching no marker must
+                    # not sail into row parsing.
+                    if resp is not None and resp.status >= 400:
+                        path = _save_diagnostic(
+                            f"{list_label}_p{page_count}_http{resp.status}_pw", next_url, body
+                        )
+                        raise FetchFailed(
+                            f"HTTP {resp.status} on page {page_count} of {url} "
+                            f"(had {len(items)} items so far); saved {path}"
+                        )
+                    break
                 what = _BLOCK_KIND_LABEL[kind]
                 path = _save_diagnostic(f"{list_label}_p{page_count}_{kind}_pw", next_url, body)
-                log.warning("%s on page %d (saved %s)", what, page_count, path)
-                if page_count == 1:
-                    raise BotDetected(f"{what} on first page of {url}")
-                raise FetchFailed(
-                    f"{what} on page {page_count} of {url} "
-                    f"(had {len(items)} items so far)"
-                )
-
-            # HTTP-status backstop, mirroring the httpx path (which refuses
-            # >= 400). page.goto's response was previously discarded, so an
-            # error body that matched no marker sailed into row parsing.
-            if resp is not None and resp.status >= 400:
-                path = _save_diagnostic(
-                    f"{list_label}_p{page_count}_http{resp.status}_pw", next_url, body
-                )
-                raise FetchFailed(
-                    f"HTTP {resp.status} on page {page_count} of {url} "
-                    f"(had {len(items)} items so far); saved {path}"
-                )
+                delay = _block_retry_delay(kind, page_count, attempt)
+                if delay is None:
+                    log.warning("%s on page %d (saved %s)", what, page_count, path)
+                    if page_count == 1:
+                        raise BotDetected(f"{what} on first page of {url}")
+                    raise FetchFailed(
+                        f"{what} on page {page_count} of {url} "
+                        f"(had {len(items)} items so far)"
+                    )
+                attempt += 1
+                log.warning("%s on page %d (saved %s); retry %d in %.0fs",
+                            what, page_count, path, attempt, delay)
+                time.sleep(delay)
 
             # Logged-out detection — only on first page; if we made it this
             # far on subsequent pages, the session is clearly fine.

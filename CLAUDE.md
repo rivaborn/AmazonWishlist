@@ -67,7 +67,7 @@ Amazon keeps issuing fresh `paginationToken`s well past the end of a wishlist, e
 
 ### Pacing (anti-bot)
 
-`run_full_scrape()` paces wishlist starts to at most one per `SCRAPE_PER_WISHLIST_SECONDS` (default 3600s) and jitters per-page requests by `REQUEST_DELAY_MIN..MAX`. During the pacing gap, progress shows `waiting=true` + `next_starts_at`. The gap is computed from the **wall-clock** `last_started_at` (persisted), not a monotonic clock, so it's honoured across a restart. Set `WISHLIST_PER_LIST_SECONDS=0` to disable pacing for one-off local testing.
+`run_full_scrape()` paces wishlist starts to at most one per `SCRAPE_PER_WISHLIST_SECONDS` (default 3600s) and jitters per-page requests by `REQUEST_DELAY_MIN..MAX`. During the pacing gap, progress shows `waiting=true` + `next_starts_at`. The gap is computed from the **wall-clock** `last_started_at` (persisted), not a monotonic clock, so it's honoured across a restart. Set `WISHLIST_PER_LIST_SECONDS=0` to disable pacing for one-off local testing. Blocked pages get bounded in-place retries via `_block_retry_delay` (shared policy in scraper.py): the 503 error page is a transient and retries up to `WISHLIST_503_RETRIES`; the anti-automation stub retries at most once and only mid-list — never on page 1, where it means the visit was refused. `run_full_scrape` also rotates the list order daily (offset = day ordinal mod list count) so every list cycles through the early-morning slots; blocks cluster by hour, and a static order starved the late-slot lists for days. Resume keeps the persisted order.
 
 ### Resume after restart (progress persistence)
 

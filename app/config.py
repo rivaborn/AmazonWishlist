@@ -53,6 +53,19 @@ MAX_PAGES_PER_WISHLIST = int(os.environ.get("WISHLIST_MAX_PAGES", "100"))
 # which is request volume spent buying anti-bot blocks.
 MAX_STALE_PAGES = int(os.environ.get("WISHLIST_MAX_STALE_PAGES", "3"))
 
+# ---------- Blocked-page retries ----------
+
+# Amazon's 503 "Dogs of Amazon" page is a transient (its own copy says "go
+# back and try again"), so the same page URL is retried with a polite backoff
+# before the list is failed for the day. The anti-automation stub is a
+# verdict, not a transient -- it gets at most ONE retry and only mid-list
+# (page 1 stub = refused at the door, retrying it is how accounts get banned).
+BLOCK_RETRY_503 = int(os.environ.get("WISHLIST_503_RETRIES", "2"))
+BLOCK_RETRY_STUB_MIDLIST = int(os.environ.get("WISHLIST_STUB_RETRIES", "1"))
+# Base backoff seconds; attempt N waits N*base + jitter. Worst case per list
+# (~2 retries) adds ~5 min, well inside the hourly pacing slot.
+BLOCK_RETRY_BACKOFF = float(os.environ.get("WISHLIST_BLOCK_BACKOFF", "90"))
+
 # ---------- Ingest guards ----------
 
 # Refuse to replace a wishlist's membership when a scrape comes back with less

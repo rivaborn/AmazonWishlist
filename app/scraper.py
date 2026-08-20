@@ -28,6 +28,9 @@ import httpx
 from selectolax.parser import HTMLParser
 
 from .config import (
+    BLOCK_RETRY_503,
+    BLOCK_RETRY_BACKOFF,
+    BLOCK_RETRY_STUB_MIDLIST,
     DATA_DIR,
     MAX_PAGES_PER_WISHLIST,
     MAX_STALE_PAGES,
@@ -163,6 +166,29 @@ def _classify_block_page(body: str) -> Optional[str]:
 
 
 _BLOCK_KIND_LABEL = {"antibot": "anti-bot stub", "error503": "Amazon 503 error page"}
+
+
+def _block_retry_delay(kind: str, page_count: int, attempt: int) -> Optional[float]:
+    """Seconds to wait before re-fetching a blocked page, or None to give up.
+
+    Policy (shared by both scrapers -- keep it here, not in the loops):
+    - "error503" is a transient; retry up to BLOCK_RETRY_503 times.
+    - "antibot" mid-list is often transient too (seen at pages 16/46/84 with
+      the next day's scrapes succeeding), so it gets BLOCK_RETRY_STUB_MIDLIST
+      cautious retries -- but NEVER on page 1, where the stub means the whole
+      visit was refused and hammering it invites a real ban.
+    `attempt` is 0-based: the first retry decision passes attempt=0.
+    """
+    if kind == "error503":
+        allowed = BLOCK_RETRY_503
+    elif kind == "antibot" and page_count > 1:
+        allowed = BLOCK_RETRY_STUB_MIDLIST
+    else:
+        allowed = 0
+    if attempt >= allowed:
+        return None
+    return BLOCK_RETRY_BACKOFF * (attempt + 1) + random.uniform(0, 15)
+
 
 
 def _save_diagnostic(label: str, url: str, body: str) -> Path:
@@ -403,30 +429,42 @@ def fetch_wishlist(url: str, *, list_label: str = "wishlist") -> list[ScrapedIte
             # rather than silently truncating. Partial ingest would replace
             # the wishlist's full membership with whatever we managed to
             # parse before the error, wiping items the wishlist still has.
-            try:
-                resp = _get(client, next_url)
-            except httpx.HTTPError as e:
-                log.warning("Wishlist page %d network error: %s", page_count, e)
-                raise FetchFailed(
-                    f"network error on page {page_count} of {url} (had {len(items)} items so far): {e}"
-                ) from e
-            body = resp.text
-            if resp.status_code >= 400:
-                path = _save_diagnostic(f"{list_label}_p{page_count}_http{resp.status_code}", next_url, body)
-                raise FetchFailed(
-                    f"HTTP {resp.status_code} on page {page_count} of {url} "
-                    f"(had {len(items)} items so far); saved {path}"
-                )
-            kind = _classify_block_page(body)
-            if kind:
+            attempt = 0
+            while True:
+                try:
+                    resp = _get(client, next_url)
+                except httpx.HTTPError as e:
+                    log.warning("Wishlist page %d network error: %s", page_count, e)
+                    raise FetchFailed(
+                        f"network error on page {page_count} of {url} (had {len(items)} items so far): {e}"
+                    ) from e
+                body = resp.text
+                # Classify the body BEFORE the generic status gate: the 503 dog
+                # page arrives with a 503 status here, and blocked pages have
+                # their own (retryable) handling via _block_retry_delay.
+                kind = _classify_block_page(body)
+                if kind is None:
+                    if resp.status_code >= 400:
+                        path = _save_diagnostic(f"{list_label}_p{page_count}_http{resp.status_code}", next_url, body)
+                        raise FetchFailed(
+                            f"HTTP {resp.status_code} on page {page_count} of {url} "
+                            f"(had {len(items)} items so far); saved {path}"
+                        )
+                    break
                 what = _BLOCK_KIND_LABEL[kind]
                 path = _save_diagnostic(f"{list_label}_p{page_count}_{kind}", next_url, body)
-                log.warning("%s on page %d (saved %s)", what, page_count, path)
-                if page_count == 1:
-                    raise BotDetected(f"{what} on first page of {url}")
-                raise FetchFailed(
-                    f"{what} on page {page_count} of {url} (had {len(items)} items so far)"
-                )
+                delay = _block_retry_delay(kind, page_count, attempt)
+                if delay is None:
+                    log.warning("%s on page %d (saved %s)", what, page_count, path)
+                    if page_count == 1:
+                        raise BotDetected(f"{what} on first page of {url}")
+                    raise FetchFailed(
+                        f"{what} on page {page_count} of {url} (had {len(items)} items so far)"
+                    )
+                attempt += 1
+                log.warning("%s on page %d (saved %s); retry %d in %.0fs",
+                            what, page_count, path, attempt, delay)
+                time.sleep(delay)
 
             tree = HTMLParser(body)
             rows = tree.css('li[data-itemId], li[data-reposition-action-params]')

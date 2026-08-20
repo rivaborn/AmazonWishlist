@@ -7,7 +7,7 @@ import logging
 import os
 import threading
 import time
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Literal, Optional
 
 from .config import (
@@ -333,7 +333,17 @@ def run_full_scrape(resume: bool = False) -> dict[str, int]:
     else:
         run_id = _now()
         started_at = run_id
-        pending_ids = [w["id"] for w in list_wishlists()]
+        ids = [w["id"] for w in list_wishlists()]
+        # Rotate the starting list daily. The schedule is fixed (one list per
+        # pacing slot from SCRAPE_HOUR), so a static order means the same lists
+        # always scrape in the same hours -- and blocks cluster by hour, which
+        # had lists 4-7 failing for days while 1-3 succeeded every morning.
+        # Rotation cycles every list through the early slots within a week.
+        # Resume keeps the persisted order, so a restart does not re-rotate.
+        offset = date.today().toordinal() % len(ids) if ids else 0
+        pending_ids = ids[offset:] + ids[:offset]
+        if offset:
+            log.info("List order rotated by %d today: %s", offset, pending_ids)
         done = 0
         items_total = 0
         total = len(pending_ids)

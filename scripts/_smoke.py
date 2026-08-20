@@ -181,6 +181,22 @@ def main() -> int:
     assert _classify_block_page(benign_empty) is None, "empty end-of-list page must not classify as a block"
     assert _classify_block_page(huge_mention) is None, "size gate must stop marker mentions in real pages"
 
+    # ---- blocked-page retry policy ----
+    from app.scraper import _block_retry_delay
+    from app.config import BLOCK_RETRY_503, BLOCK_RETRY_STUB_MIDLIST
+
+    # 503 retries on any page, then gives up
+    assert _block_retry_delay("error503", 1, 0) is not None
+    assert _block_retry_delay("error503", 40, BLOCK_RETRY_503 - 1) is not None
+    assert _block_retry_delay("error503", 40, BLOCK_RETRY_503) is None, "503 must give up after its budget"
+    # stub: never retried on page 1, one cautious retry mid-list
+    assert _block_retry_delay("antibot", 1, 0) is None, "page-1 stub must never retry"
+    assert _block_retry_delay("antibot", 2, 0) is not None
+    assert _block_retry_delay("antibot", 2, BLOCK_RETRY_STUB_MIDLIST) is None
+    # backoff grows per attempt
+    d0 = _block_retry_delay("error503", 5, 0); d1 = _block_retry_delay("error503", 5, 1)
+    assert d0 is not None and d1 is not None and d1 > d0 - 15, (d0, d1)
+
     # ---- ingest refuses a short scrape once, then accepts the confirmed shrink ----
     from app.services import SuspiciousShrink
     shrink_wid = add_wishlist("https://www.amazon.com/hz/wishlist/ls/FAKESHRINK", "shrink")
