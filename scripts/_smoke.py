@@ -181,6 +181,17 @@ def main() -> int:
     assert _classify_block_page(benign_empty) is None, "empty end-of-list page must not classify as a block"
     assert _classify_block_page(huge_mention) is None, "size gate must stop marker mentions in real pages"
 
+    # ---- scrape order: most-dated first ----
+    from app.services import _scrape_order
+
+    order = _scrape_order([
+        {"id": 1, "last_scraped_at": "2026-08-21T02:03:54", "added_at": "2026-05-02T22:06:47"},
+        {"id": 2, "last_scraped_at": None,                  "added_at": "2026-08-20T12:00:00"},  # never scraped, added recently
+        {"id": 3, "last_scraped_at": "2026-08-20T06:06:44", "added_at": "2026-05-02T22:07:19"},  # failed since -> stalest scrape
+        {"id": 4, "last_scraped_at": None,                  "added_at": "2026-05-01T00:00:00"},  # never scraped, ancient
+    ])
+    assert order == [4, 3, 2, 1], order  # oldest basis first; fresh success last
+
     # ---- blocked-page retry policy ----
     from app.scraper import _block_retry_delay
     from app.config import BLOCK_RETRY_503, BLOCK_RETRY_STUB_MIDLIST

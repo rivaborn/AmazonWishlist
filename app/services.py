@@ -7,7 +7,7 @@ import logging
 import os
 import threading
 import time
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 from typing import Literal, Optional
 
 from .config import (
@@ -302,6 +302,28 @@ def ingest_wishlist(wishlist_id: int, items: list[ScrapedItem]) -> None:
             raise
 
 
+def _scrape_order(rows: list[dict]) -> list[int]:
+    """Order wishlists most-dated first for a scrape run.
+
+    The list that has gone longest without a successful scrape gets the safest
+    slot of the night (00:00 succeeds essentially always; blocks cluster in the
+    later slots). This is self-balancing where the old daily rotation was
+    blind: yesterday's failure is today's stalest list, so a blocked list is
+    automatically promoted to the best slot, and a freshly scraped list rides
+    the risky tail where a failure costs only one day of staleness. A
+    never-scraped list ages from `added_at` — the same basis as the UI's
+    staleness flag. Timestamps are `_now()` ISO strings, so lexicographic
+    order IS chronological order.
+    """
+    return [
+        w["id"]
+        for w in sorted(
+            rows,
+            key=lambda w: (w.get("last_scraped_at") or w.get("added_at") or "", w["id"]),
+        )
+    ]
+
+
 def run_full_scrape(resume: bool = False) -> dict[str, int]:
     """Scrape every registered wishlist; return per-wishlist item counts.
 
@@ -333,17 +355,10 @@ def run_full_scrape(resume: bool = False) -> dict[str, int]:
     else:
         run_id = _now()
         started_at = run_id
-        ids = [w["id"] for w in list_wishlists()]
-        # Rotate the starting list daily. The schedule is fixed (one list per
-        # pacing slot from SCRAPE_HOUR), so a static order means the same lists
-        # always scrape in the same hours -- and blocks cluster by hour, which
-        # had lists 4-7 failing for days while 1-3 succeeded every morning.
-        # Rotation cycles every list through the early slots within a week.
-        # Resume keeps the persisted order, so a restart does not re-rotate.
-        offset = date.today().toordinal() % len(ids) if ids else 0
-        pending_ids = ids[offset:] + ids[:offset]
-        if offset:
-            log.info("List order rotated by %d today: %s", offset, pending_ids)
+        # Most-dated first (see _scrape_order). Resume keeps the persisted
+        # order, so a restart does not reshuffle mid-run.
+        pending_ids = _scrape_order(list_wishlists())
+        log.info("Scrape order (most-dated first): %s", pending_ids)
         done = 0
         items_total = 0
         total = len(pending_ids)
