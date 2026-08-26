@@ -1,16 +1,29 @@
+from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
 from fastapi import APIRouter, Query, Request
 from fastapi.responses import RedirectResponse
 from fastapi.templating import Jinja2Templates
 
-from .. import services
+from .. import config, services, sync
 from ..pagination import DEFAULT_PER_PAGE, PER_PAGE_MAX, PER_PAGE_MIN, paginate
 
 router = APIRouter()
 templates = Jinja2Templates(
     directory=str(Path(__file__).resolve().parent.parent / "templates")
 )
+
+
+def _ctx(extra: dict) -> dict:
+    """Role context every template needs, since they all extend base.html.
+
+    `readonly` drives more than cosmetics: the purchased checkboxes are wired to
+    a POST that a mirror answers with 403, and the shared handler in base.html
+    reacts to a failure by silently un-ticking the box again. On a mirror the
+    control must not render at all.
+    """
+    return {"role": config.ROLE, "readonly": config.is_secondary(), **extra}
 
 
 def _basis(value: str) -> str:
@@ -47,14 +60,14 @@ def deals_page(
     return templates.TemplateResponse(
         request,
         "deals.html",
-        {
+        _ctx({
             "rows": pagination["rows"],
             "pagination": pagination,
             "min_dollar": min_dollar,
             "min_pct": min_pct,
             "basis": b,
             "active": "deals",
-        },
+        }),
     )
 
 
@@ -71,12 +84,12 @@ def books_page(
     return templates.TemplateResponse(
         request,
         "books.html",
-        {
+        _ctx({
             "rows": pagination["rows"],
             "summary": summary,
             "pagination": pagination,
             "active": "books",
-        },
+        }),
     )
 
 
@@ -108,13 +121,13 @@ def no_price_page(
     return templates.TemplateResponse(
         request,
         "no_price.html",
-        {
+        _ctx({
             "kindle_unavailable": kindle_pagination["rows"],
             "kindle_pagination": kindle_pagination,
             "page_404": p404_pagination["rows"],
             "p404_pagination": p404_pagination,
             "active": "no_price",
-        },
+        }),
     )
 
 
@@ -139,14 +152,14 @@ def price_drops_page(
     return templates.TemplateResponse(
         request,
         "price_drops.html",
-        {
+        _ctx({
             "rows": pagination["rows"],
             "pagination": pagination,
             "min_dollar": min_dollar,
             "min_pct": min_pct,
             "basis": b,
             "active": "price_drops",
-        },
+        }),
     )
 
 
@@ -163,11 +176,11 @@ def purchased_page(
     return templates.TemplateResponse(
         request,
         "purchased.html",
-        {
+        _ctx({
             "rows": pagination["rows"],
             "pagination": pagination,
             "active": "purchased",
-        },
+        }),
     )
 
 
@@ -178,15 +191,47 @@ def wishlists_page(request: Request):
         SCRAPE_HOUR,
         SCRAPE_MINUTE,
         SCRAPE_PER_WISHLIST_SECONDS,
+        SYNC_HOUR,
+        SYNC_MINUTE,
     )
+
+    sync_status = sync.get_sync_status() if config.is_secondary() else None
     return templates.TemplateResponse(
         request,
         "wishlists.html",
-        {
-            "wishlists": services.list_wishlists(),
+        _ctx({
+            "wishlists": services.list_wishlists(now=_mirror_now(sync_status)),
             "active": "wishlists",
             "scrape_time": f"{SCRAPE_HOUR:02d}:{SCRAPE_MINUTE:02d}",
             "per_list_seconds": SCRAPE_PER_WISHLIST_SECONDS,
             "shrink_floor": INGEST_SHRINK_FLOOR,
-        },
+            "sync": sync_status,
+            "sync_time": f"{SYNC_HOUR:02d}:{SYNC_MINUTE:02d}",
+        }),
     )
+
+
+def _mirror_now(sync_status: Optional[dict]) -> Optional[datetime]:
+    """The primary's clock, advanced by however long ago we last synced.
+
+    Every timestamp in a mirrored row was written by `services._now()` on the
+    primary — naive server-LOCAL time. Comparing those against this box's clock
+    is wrong by the timezone offset, and in the direction where we are behind
+    the primary the computed age goes negative, so `stale` never fires and the
+    only honest health column on this page silently switches itself off.
+
+    Returns None (i.e. "use local now") on a primary or when we have never
+    completed a sync, which is the correct behaviour in both cases.
+    """
+    if not sync_status:
+        return None
+    source_now = sync_status.get("source_now")
+    synced_at = sync_status.get("synced_at_local")
+    if not source_now or not synced_at:
+        return None
+    try:
+        return datetime.fromisoformat(source_now) + (
+            datetime.now() - datetime.fromisoformat(synced_at)
+        )
+    except (TypeError, ValueError):
+        return None

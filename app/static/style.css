@@ -69,3 +69,24 @@ td.stale { color: var(--muted); }
 .cb-col { width: 28px; padding-left: .5rem; padding-right: .25rem; }
 td.cb-col input.purchased-cb { cursor: pointer; transform: scale(1.1); }
 td.cb-col input.purchased-cb:disabled { cursor: progress; }
+
+/* ---------- mirror mode (WISHLIST_ROLE=secondary) ---------- */
+
+.role-badge {
+  font-size: 0.5em;
+  vertical-align: middle;
+  padding: 0.15em 0.5em;
+  border-radius: 3px;
+  background: #444;
+  color: #eee;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+/* One rule instead of an {% if %} in all six tables that emit a .cb-col.
+   Hiding it is not cosmetic: the POST behind it is answered 403 on a mirror,
+   and the handler's failure path just silently un-ticks the box again. */
+.readonly .cb-col input { display: none; }
+
+#sync-section .sync-error { color: #b00; }
+#sync-section .sync-ok { color: #060; }

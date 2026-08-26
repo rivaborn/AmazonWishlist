@@ -19,6 +19,7 @@ from .config import (
     SCRAPE_PER_WISHLIST_SECONDS,
     STALE_AFTER_HOURS,
     STORAGE_STATE,
+    is_secondary,
     use_playwright,
 )
 from .db import connect
@@ -43,6 +44,14 @@ class SuspiciousShrink(Exception):
     Refusing once and accepting a shrink that a second consecutive scrape agrees
     with is what keeps this a guard rather than a trap: a list the owner really
     did prune returns to normal within a day instead of stranding.
+    """
+
+
+class MirrorReadOnly(Exception):
+    """A write that only a primary may perform was attempted on a secondary.
+
+    See the guard in `ingest_wishlist` for why this is enforced down here rather
+    than at the HTTP layer.
     """
 
 
@@ -131,7 +140,7 @@ def remove_wishlist(wishlist_id: int) -> None:
         conn.execute("DELETE FROM wishlist WHERE id = ?", (wishlist_id,))
 
 
-def list_wishlists() -> list[dict]:
+def list_wishlists(now: Optional[datetime] = None) -> list[dict]:
     """Every wishlist plus its current size and how stale its last scrape is.
 
     `stale_hours` / `stale` are derived here rather than in the template because
@@ -141,6 +150,14 @@ def list_wishlists() -> list[dict]:
     bot-blocked for days still renders a perfectly matched Previous/Current
     pair. Age is the one column that moves. A never-scraped wishlist ages from
     `added_at`, so it is not exempt.
+
+    `now` exists for mirrors. `_now()` writes naive server-LOCAL time, so a
+    secondary in another timezone comparing the primary's `last_scraped_at`
+    against its own clock gets an age off by the offset — and where it is behind
+    the primary the age goes negative and `stale` silently never fires again,
+    disabling the one honest column. `routes/pages.py` passes the primary's
+    clock, carried down in the sync catalog. On a primary this stays None and
+    nothing changes.
     """
     with connect() as conn:
         rows = conn.execute(
@@ -154,7 +171,7 @@ def list_wishlists() -> list[dict]:
             """
         ).fetchall()
 
-    now = datetime.now()
+    now = now or datetime.now()
     out = []
     for r in rows:
         d = dict(r)
@@ -205,6 +222,19 @@ def ingest_wishlist(wishlist_id: int, items: list[ScrapedItem]) -> None:
     completed scrape was refused for the same reason AND the two short counts
     agree (see the class docstring).
     """
+    # The chokepoint that keeps a mirror a mirror. This is the ONLY function in
+    # the app that inserts into price_snapshot, and it guards here rather than at
+    # the route because `run_full_scrape` has three callers (the API, the cron
+    # job, and resume_if_interrupted). A locally-inserted snapshot on a secondary
+    # would take sqlite_sequence's max+1 — exactly the id the primary will next
+    # hand to a DIFFERENT row — and the mirrored row would then be silently
+    # dropped by INSERT OR IGNORE while the watermark sailed past it.
+    if is_secondary():
+        raise MirrorReadOnly(
+            "this instance is a secondary (mirror); it must never write its own "
+            "snapshots — data arrives via app/sync_client.py"
+        )
+
     now = _now()
     new_count = len(items)
     with connect() as conn:
@@ -340,6 +370,10 @@ def run_full_scrape(resume: bool = False) -> dict[str, int]:
     Idempotent against concurrent calls only via the API guard
     (`POST /api/scrape/run` rejects if `running` is True).
     """
+    if is_secondary():
+        log.warning("Scrape requested on a secondary (mirror) — ignoring")
+        return {}
+
     interval = max(0, SCRAPE_PER_WISHLIST_SECONDS)
 
     if resume and (_progress.get("pending_ids") or []):

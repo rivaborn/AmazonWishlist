@@ -3,6 +3,15 @@
 {% block content %}
 <h2>Amazon login</h2>
 
+{% if readonly %}
+{# Reachable by direct URL only — base.html drops the nav link on a mirror.
+   A mirror never fetches from Amazon, so it has no session to manage. #}
+<p class="empty">
+  This instance is a read-only <strong>mirror</strong>. It never fetches from Amazon,
+  so there is no Amazon session to manage here — log in on the primary.
+</p>
+{% else %}
+
 <section id="login-status">
   <p class="hint" id="status-line">Loading…</p>
   {% if status.error %}
@@ -150,4 +159,5 @@
   poll();
 })();
 </script>
+{% endif %}
 {% endblock %}

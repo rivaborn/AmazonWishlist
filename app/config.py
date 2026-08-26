@@ -19,7 +19,11 @@ RESUME_MAX_AGE_SEC = int(os.environ.get("WISHLIST_RESUME_MAX_AGE", str(24 * 3600
 
 PORT = int(os.environ.get("WISHLIST_PORT", "9060"))
 
-SCRAPE_HOUR = int(os.environ.get("WISHLIST_SCRAPE_HOUR", "3"))
+# 00:00 rather than an early-morning hour on purpose: Amazon's blocks cluster by
+# hour and the midnight slot is the quietest we have measured, and starting at
+# 00:00 leaves the whole day of headroom before the mirror's daily sync (see
+# SYNC_HOUR) for a paced run of one wishlist per hour.
+SCRAPE_HOUR = int(os.environ.get("WISHLIST_SCRAPE_HOUR", "0"))
 SCRAPE_MINUTE = int(os.environ.get("WISHLIST_SCRAPE_MINUTE", "0"))
 
 # Minimum seconds between the start of one wishlist and the start of the next
@@ -108,3 +112,53 @@ LOGIN_IDLE_TIMEOUT_SEC = int(os.environ.get("WISHLIST_LOGIN_IDLE_TIMEOUT", "600"
 XVFB_DISPLAY = os.environ.get("WISHLIST_XVFB_DISPLAY", ":99")
 XVFB_RESOLUTION = os.environ.get("WISHLIST_XVFB_RESOLUTION", "1280x800x24")
 NOVNC_WEB_DIR = Path(os.environ.get("WISHLIST_NOVNC_DIR", "/usr/share/novnc"))
+
+
+# ---------- Role: primary scrapes, secondary mirrors (see README "Two-instance mirror") ----------
+
+# Only ONE instance may scrape Amazon. Two instances hitting the same throwaway
+# account from two IPs is exactly the traffic pattern the pacing and anti-bot
+# guards exist to avoid, so the secondary pulls the primary's data over HTTP
+# instead. `primary` is the default, so existing single-host installs are
+# unaffected by this file growing a role.
+ROLE = os.environ.get("WISHLIST_ROLE", "primary").strip().lower()
+
+
+def is_secondary() -> bool:
+    """True when this instance mirrors another rather than scraping.
+
+    Read through a function against the module global (same shape as
+    `use_playwright()` above) so tests can flip the role at runtime instead of
+    having to re-import the whole app.
+    """
+    return ROLE == "secondary"
+
+
+# Base URL of the primary, e.g. http://192.168.50.43:9060 -- must name the port
+# the primary actually serves on (the systemd unit hardcodes --port 9060).
+PRIMARY_URL = os.environ.get("WISHLIST_PRIMARY_URL", "").strip().rstrip("/")
+
+# Daily, in server-local time, like the primary's scrape cron -- deliberately
+# AFTER the primary has finished its run, so one pull picks up the whole night.
+# The primary starts its run at SCRAPE_HOUR and paces one wishlist per
+# SCRAPE_PER_WISHLIST_SECONDS, measured from the PREVIOUS list's start -- so the
+# last of N lists begins at SCRAPE_HOUR + (N-1) hours. This must sit past that,
+# or the lists scraped last stay a day behind on the mirror. With a 00:00 run
+# start, 08:00 covers up to 8 wishlists.
+SYNC_HOUR = int(os.environ.get("WISHLIST_SYNC_HOUR", "8"))
+SYNC_MINUTE = int(os.environ.get("WISHLIST_SYNC_MINUTE", "0"))
+
+# Not REQUEST_TIMEOUT: that one is 20s and tuned for Amazon. A snapshot page off
+# a LAN peer is a bigger, slower response from a friendlier host.
+SYNC_TIMEOUT = float(os.environ.get("WISHLIST_SYNC_TIMEOUT", "60"))
+
+# Snapshot rows per request. They travel as positional arrays (~85 bytes/row vs
+# ~170 as objects) and are the entire bulk of the transfer. The MAX is a
+# server-side clamp: unclamped, `?limit=99999999` is a trivial way to exhaust
+# memory on a box that also runs Chromium.
+SYNC_PAGE_LIMIT = int(os.environ.get("WISHLIST_SYNC_PAGE_LIMIT", "2000"))
+SYNC_PAGE_LIMIT_MAX = 10000
+
+# Advisory telemetry only -- the sync cursor is MAX(price_snapshot.id) in the DB,
+# never this file. See app/sync.py.
+SYNC_STATE_PATH = Path(os.environ.get("WISHLIST_SYNC_STATE", DATA_DIR / "sync_state.json"))

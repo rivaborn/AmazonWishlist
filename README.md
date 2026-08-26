@@ -11,7 +11,7 @@ Two scraper modes, selected automatically based on whether a saved login session
 
 Other behaviour:
 
-- Scrapes each registered wishlist URL once a day at 03:00 server-local time, **at most one wishlist per hour** to stay under Amazon's bot-detection threshold (also on demand via the "Run scrape now" button — same pacing applies).
+- Scrapes each registered wishlist URL once a day at 00:00 server-local time, **at most one wishlist per hour** to stay under Amazon's bot-detection threshold (also on demand via the "Run scrape now" button — same pacing applies).
 - Stores every observation as a snapshot in SQLite, so price-drop math works against either the previous observed price or Amazon's list/strikethrough price.
 - Collapses duplicate ASINs across wishlists.
 - Only shows books that are *currently* on a wishlist.
@@ -87,7 +87,7 @@ Set in `amazon-wishlist.service` under `Environment=` if you need to override.
 | `WISHLIST_PORT` | `9060` | HTTP port |
 | `WISHLIST_DB` | `data/wishlist.db` | SQLite path |
 | `WISHLIST_LOG` | `data/scrape.log` | rotating scrape log |
-| `WISHLIST_SCRAPE_HOUR` | `3` | daily cron hour (server local) |
+| `WISHLIST_SCRAPE_HOUR` | `0` | daily cron hour (server local). Midnight: blocks cluster by hour and this slot is the quietest, and it leaves room for a paced run to finish before the mirror's daily sync. |
 | `WISHLIST_SCRAPE_MINUTE` | `0` | daily cron minute |
 | `WISHLIST_PER_LIST_SECONDS` | `3600` | minimum seconds between starting one wishlist and the next during a single run. Set to `0` to disable pacing for one-off testing. |
 | `WISHLIST_PROGRESS` | `data/scrape_progress.json` | scrape progress is mirrored here on every step; on startup an interrupted run is resumed from it (see "Resume after restart" below) |
@@ -109,6 +109,13 @@ Set in `amazon-wishlist.service` under `Environment=` if you need to override.
 | `WISHLIST_XVFB_DISPLAY` | `:99` | Display number for the virtual X server during login. |
 | `WISHLIST_XVFB_RESOLUTION` | `1280x800x24` | Geometry for the virtual display. |
 | `WISHLIST_NOVNC_DIR` | `/usr/share/novnc` | Where the apt `novnc` package lays out its HTML/JS. |
+| `WISHLIST_ROLE` | `primary` | `primary` scrapes Amazon; `secondary` never does and mirrors a primary instead. See "Two-instance mirror". |
+| `WISHLIST_PRIMARY_URL` | *(unset)* | Secondary only: base URL of the primary, e.g. `http://192.168.50.43:9060`. Must name the port the primary actually serves on. |
+| `WISHLIST_SYNC_HOUR` | `8` | Secondary only: daily sync hour, server local time. Set this **after** the primary's run finishes — see "Picking the sync time". |
+| `WISHLIST_SYNC_MINUTE` | `0` | Secondary only: daily sync minute. |
+| `WISHLIST_SYNC_TIMEOUT` | `60` | Read timeout (seconds) for a sync request. Separate from `WISHLIST_TIMEOUT`, which is tuned for Amazon. |
+| `WISHLIST_SYNC_PAGE_LIMIT` | `2000` | Snapshot rows per sync request. Server-side hard clamp is 10000. |
+| `WISHLIST_SYNC_STATE` | `data/sync_state.json` | Secondary only: last-sync telemetry. Advisory — the real sync cursor is `MAX(price_snapshot.id)` in the database. |
 
 ## Pages
 
@@ -116,7 +123,8 @@ Set in `amazon-wishlist.service` under `Environment=` if you need to override.
 - **/books** — every available book across all wishlists, sorted by current price ascending. Header shows total count, lowest, and highest.
 - **/no-price** — split into "Kindle edition unavailable" and "Removed from Amazon" (HTTP 404).
 - **/price-drops** — every historical snapshot that dropped vs. its baseline, filtered.
-- **/wishlists** — add/remove wishlist URLs, run scrape on demand. Each row shows when it was last scraped and the item count from that scrape. The Run-scrape button shows a live progress bar and a "Waiting until HH:MM:SS" indicator between paced scrapes.
+- **/wishlists** — add/remove wishlist URLs, run scrape on demand. On a secondary this becomes a read-only table plus a mirror-status panel. Each row shows when it was last scraped and the item count from that scrape. The Run-scrape button shows a live progress bar and a "Waiting until HH:MM:SS" indicator between paced scrapes.
+- **/purchased** — books marked purchased. They are excluded from every other view and shown here regardless of whether they are still on a wishlist.
 - **/login** — log in to the secondary Amazon account that the authenticated scraper uses. See "Authenticated scraping" below.
 
 ## Authenticated scraping (Playwright + Login tab)
@@ -137,7 +145,7 @@ Low if you isolate the secondary properly. Don't reuse the same email, phone, pa
    - `websockify` wrapping the VNC port as a WebSocket and serving noVNC's web client at `:6080`
 3. Within ~5–10 s the iframe shows Amazon's homepage. Sign into the **secondary** account, complete any 2FA / new-device verification, land on the homepage.
 4. Click **Save session**. Server calls Playwright's `context.storage_state(path=…)` and writes `data/storage_state.json` (atomic, `0600 wishlist:wishlist`). All subprocesses are torn down.
-5. Next scrape (manual button or 03:00 cron) auto-detects the file, logs `Scraper path: playwright`, and uses the logged-in session.
+5. Next scrape (manual button or midnight cron) auto-detects the file, logs `Scraper path: playwright`, and uses the logged-in session.
 
 If you walk away mid-login, the session auto-cancels after `WISHLIST_LOGIN_IDLE_TIMEOUT` (default 10 min). The page sends heartbeats while you're using it, so it won't timeout while active.
 
@@ -212,7 +220,7 @@ Two JSON endpoints back the wishlists page UI and can be polled by anything else
   ```json
   {
     "running": true,
-    "started_at": "2026-05-03T03:00:00.000000",
+    "started_at": "2026-05-03T00:00:00.000000",
     "finished_at": null,
     "total": 7,
     "done": 2,
@@ -229,9 +237,25 @@ Two JSON endpoints back the wishlists page UI and can be polled by anything else
 
   (The status JSON also carries `run_id`, `pending_ids`, and `last_started_at` — internal resume bookkeeping; safe to ignore.)
 
+On a secondary, `POST /api/scrape/run` returns **403** — mirrors never scrape.
+
+### Sync API
+
+Served by the **primary** and consumed by the secondary:
+
+- `GET /api/sync/catalog` — the whole small half of the DB (`wishlist`, `book`, `wishlist_book`) read in one transaction, plus `max_snapshot_id` (the watermark that catalog is consistent with) and `source_now` (the primary's clock).
+- `GET /api/sync/snapshots?since_id=&max_id=&limit=` — one ascending page of the append-only `price_snapshot` log as positional arrays. Returns `has_more` / `next_since_id`.
+
+About **this** instance's own mirroring, on either role:
+
+- `GET /api/sync/status` — role, primary URL, last success/error, watermark, row counts.
+- `POST /api/sync/run` — pull now. **403** on a primary, which has nothing to sync from.
+
+⚠️ The two export endpoints hand out the entire database, and like the rest of this app they are unauthenticated. Firewall port 9060 to the peer IP or your VPN subnet.
+
 ## Resume after restart
 
-A full scrape takes hours (one wishlist per `WISHLIST_PER_LIST_SECONDS`, default 1h). The daily run therefore overlaps `apt-daily-upgrade`, and a security upgrade to a library the service links (e.g. `openssl`/`libssl`) makes `needrestart` **restart the service mid-scrape**, which would otherwise abandon the run until the next 03:00 cron and leave some wishlists on stale data.
+A full scrape takes hours (one wishlist per `WISHLIST_PER_LIST_SECONDS`, default 1h). The daily run therefore overlaps `apt-daily-upgrade`, and a security upgrade to a library the service links (e.g. `openssl`/`libssl`) makes `needrestart` **restart the service mid-scrape**, which would otherwise abandon the run until the next midnight cron and leave some wishlists on stale data.
 
 To survive that, progress is persisted to `WISHLIST_PROGRESS` (`data/scrape_progress.json`) on every step — including the remaining-wishlist queue (`pending_ids`) and the wall-clock start of the last wishlist (so the per-list pacing gap is honoured across a restart). On startup the app checks that file: if a run was interrupted (queue still non-empty) and is younger than `WISHLIST_RESUME_MAX_AGE`, it resumes in the background, scraping **only** the wishlists that hadn't completed. A normal finish drains the queue, and a login-expiry abort clears it, so neither triggers a spurious resume.
 
@@ -249,9 +273,86 @@ SQLite, file at `data/wishlist.db`. Schema is created/migrated on startup.
 
 `availability` is `available` | `kindle_unavailable` | `page_404`.
 
+`book` also carries `purchased` (0/1). `price_snapshot.id` is an `AUTOINCREMENT` primary key and the table is append-only — nothing in the app ever updates or deletes a snapshot. That, plus SQLite being single-writer, is what makes `MAX(id)` a safe sync cursor; see "Two-instance mirror".
+
+On a secondary, `data/sync_state.json` records last-sync telemetry. It is **not** the cursor — a file cursor and the rows it describes are two separate writes and can diverge on a crash.
+
+## Two-instance mirror (primary / secondary)
+
+To run the app at two locations, exactly **one** instance may scrape. Two instances hitting the same throwaway Amazon account from two IPs is precisely the traffic pattern the pacing and anti-bot guards exist to avoid.
+
+- **Primary** — behaves exactly as a single instance always has. It additionally serves `/api/sync/*`.
+- **Secondary** — never scrapes and never logs in. It pulls the primary's data into its own SQLite on an interval, so every page works identically and keeps working while the primary is unreachable. It is strictly read-only: adding wishlists and ticking "purchased" happen on the primary and mirror down. Write endpoints return 403 and the controls behind them are not rendered.
+
+`primary` is the default, so an existing single-host install needs no change.
+
+### Setup
+
+Per-host settings go in `/etc/default/amazon-wishlist`, **not** in the unit file — `install_systemd.sh` reinstalls the unit from the repo on every deploy and would revert an edit there.
+
+On the primary, nothing is required. On the secondary:
+
+```bash
+sudo tee /etc/default/amazon-wishlist >/dev/null <<'EOF'
+WISHLIST_ROLE=secondary
+WISHLIST_PRIMARY_URL=http://192.168.50.43:9060
+EOF
+sudo chmod 640 /etc/default/amazon-wishlist
+sudo chown root:wishlist /etc/default/amazon-wishlist
+sudo systemctl restart amazon-wishlist
+```
+
+Then check the log line naming the resolved role — this is the one thing worth verifying on every deploy, because a secondary that came up as a primary will start scraping Amazon from a second IP:
+
+```bash
+journalctl -u amazon-wishlist -n 20 | grep '^Role:'
+```
+
+Note `ExecStart` hardcodes `--port 9060`, so `WISHLIST_PORT` is decorative and `WISHLIST_PRIMARY_URL` must name port 9060.
+
+### What to expect
+
+The secondary syncs **once a day** at `WISHLIST_SYNC_HOUR:WISHLIST_SYNC_MINUTE` (default 08:00 server local), plus once at startup — so a restart re-converges immediately instead of waiting up to a day. You can always force one with the **Sync now** button on `/wishlists` or `POST /api/sync/run`.
+
+The first sync pulls the full snapshot history — for ~1,000 tracked items that is roughly 30 MB over ~180 requests, i.e. a minute or two on a LAN. Every sync after that carries only new rows. A sync also runs once at startup, so a restart re-converges immediately rather than waiting out the interval.
+
+The `/wishlists` page on a secondary shows **two** freshness figures, which answer different questions: the per-row *stale* flag is how old the **primary's scrape** is (computed against the primary's own clock, carried down with the catalog, so the two hosts need not share a timezone), and the mirror panel is how old **our copy of the primary** is.
+
+### Picking the sync time
+
+The sync hour must land **after** the primary has finished its nightly run, or the wishlists it scrapes last stay a day behind on the mirror.
+
+The primary starts its whole run at `WISHLIST_SCRAPE_HOUR` and paces one wishlist per `WISHLIST_PER_LIST_SECONDS` (default 1h). Pacing is measured from the *previous* list's start, so the first list begins immediately at the cron fire and list *k* begins `k-1` hours in:
+
+```
+last list starts   =  WISHLIST_SCRAPE_HOUR + (N - 1) hours     # N = number of wishlists
+```
+
+With the run starting at **00:00** and the sync at the default **08:00**, that covers up to **8 wishlists** (the 8th starts at 07:00 and finishes well before 08:00). Leave an hour of slack for blocked-page retries — `WISHLIST_503_RETRIES` backoff can add ~5 min per list:
+
+| wishlists | last list starts | 08:00 sync catches it? |
+| --------- | ---------------- | ---------------------- |
+| 7         | 06:00            | yes, ~1.5h to spare    |
+| 8         | 07:00            | yes, tight             |
+| 9         | 08:00            | no — races the sync    |
+
+Getting it wrong is not a data problem — nothing is lost or corrupted, and the mirror is never internally inconsistent, because a sync is always a coherent prefix. The lists scraped after the sync fires simply arrive on the *next* day's sync. The mirror panel's "synced Nh ago" and each row's stale flag are what surface it.
+
+### Recovery
+
+The secondary refuses a catalog that would shrink its membership below `WISHLIST_SHRINK_FLOOR` unless a second, agreeing catalog confirms it — the same rule that protects an ingest. It also refuses a primary whose `max_snapshot_id` has gone *backwards*, which means that primary's database was rebuilt, restored from an older backup, or `WISHLIST_PRIMARY_URL` now points somewhere else. Both show up in `GET /api/sync/status` as `last_error`.
+
+For the regression case the fix is a full resync — the secondary holds nothing the primary doesn't:
+
+```bash
+sudo systemctl stop amazon-wishlist
+sudo -u wishlist rm /opt/amazon-wishlist/data/wishlist.db*
+sudo systemctl start amazon-wishlist
+```
+
 ## Notes / limitations
 
-- Amazon actively rate-limits scrapers. The defaults (3 AM start, 1-hour pacing, 4–9 s per-page jitter, browser-like headers) are tuned to fly under the radar for accounts with a handful of wishlists totaling around 1,000 items. Larger accounts or noisier IPs may still see occasional bot-blocks; the app preserves the prior state when this happens and saves the offending HTML to `data/diagnostics/`.
+- Amazon actively rate-limits scrapers. The defaults (midnight start, 1-hour pacing, 4–9 s per-page jitter, browser-like headers) are tuned to fly under the radar for accounts with a handful of wishlists totaling around 1,000 items. Larger accounts or noisier IPs may still see occasional bot-blocks; the app preserves the prior state when this happens and saves the offending HTML to `data/diagnostics/`.
 - **A failed scrape leaves every count untouched, on purpose** ("never clobber good data"), so a wishlist that has been bot-blocked for days still shows a matching Previous/Current pair on `/wishlists` and looks perfectly healthy. `last_scraped_at` is the only column that moves — it is flagged **stale** past `WISHLIST_STALE_AFTER_HOURS`. Read the age, not the counts.
 - Amazon's HTML structure changes occasionally. If scrapes start returning 0 items *without* a "bot-blocked" status, check `data/diagnostics/` for the saved HTML and update the selectors in `app/scraper.py`.
-- This is a single-user app; there is no auth on the web UI. Don't expose it to the public internet without a reverse proxy + auth in front.
+- This is a single-user app; there is no auth on the web UI, and none on `/api/sync/*` either — which serves the whole database. Don't expose it to the public internet without a reverse proxy + auth in front, and firewall port 9060 to the peer / VPN subnet when running a mirror.

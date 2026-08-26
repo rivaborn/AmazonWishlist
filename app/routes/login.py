@@ -10,11 +10,21 @@ POST /api/login/heartbeat    → reset the idle timer (called by the page poll)
 
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 from fastapi.templating import Jinja2Templates
 
-from .. import login_session
+from .. import config, login_session
+
+
+def _require_primary() -> None:
+    """A mirror has no Amazon session to manage — it never fetches from Amazon.
+    GET /login and the status endpoint stay open so the page can say so."""
+    if config.is_secondary():
+        raise HTTPException(
+            403, "this instance is a read-only mirror; log in on the primary"
+        )
+
 
 router = APIRouter()
 templates = Jinja2Templates(
@@ -31,6 +41,8 @@ def login_page(request: Request):
         {
             "active": "login",
             "status": mgr.status(),
+            "readonly": config.is_secondary(),
+            "role": config.ROLE,
         },
     )
 
@@ -40,7 +52,7 @@ def login_status():
     return login_session.get_manager().status()
 
 
-@router.post("/api/login/start")
+@router.post("/api/login/start", dependencies=[Depends(_require_primary)])
 def login_start():
     try:
         return login_session.get_manager().start()
@@ -48,7 +60,7 @@ def login_start():
         raise HTTPException(500, str(e))
 
 
-@router.post("/api/login/save")
+@router.post("/api/login/save", dependencies=[Depends(_require_primary)])
 def login_save():
     try:
         return login_session.get_manager().save()
@@ -56,12 +68,12 @@ def login_save():
         raise HTTPException(400, str(e))
 
 
-@router.post("/api/login/cancel")
+@router.post("/api/login/cancel", dependencies=[Depends(_require_primary)])
 def login_cancel():
     return login_session.get_manager().cancel()
 
 
-@router.post("/api/login/heartbeat")
+@router.post("/api/login/heartbeat", dependencies=[Depends(_require_primary)])
 def login_heartbeat():
     login_session.get_manager().heartbeat()
     return JSONResponse({"ok": True})

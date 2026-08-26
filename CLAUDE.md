@@ -19,6 +19,8 @@ uvicorn app.main:app --reload --port 9060        # open http://localhost:9060/
 # Tests — there is no pytest suite. The single test is an end-to-end smoke
 # test that runs every page + ingest + drop math against a fake payload (no network):
 python scripts/_smoke.py                          # exit 0 = pass; uses a throwaway temp DB
+# It also runs a full mirror round-trip with no network: two SQLite files in one
+# process (it monkeypatches `app.db.DB_PATH`, which `connect()` reads per call).
 
 # Production deploy on Ubuntu (idempotent — re-run after every change):
 git pull && sudo bash scripts/install_systemd.sh # rsyncs to /opt/amazon-wishlist, refreshes venv, restarts unit
@@ -76,6 +78,22 @@ A full run takes hours (1 list/hour), so it overlaps `apt-daily-upgrade`; a secu
 ### In-app login stack (`login_session.py`)
 
 The Login tab logs into a **separate, throwaway** Amazon account whose session powers the authenticated scraper. `LoginSessionManager` is a lock-guarded singleton allowing one session at a time. Start spawns, in order: `Xvfb` (virtual display) → Playwright-driven **headful** Chromium on that display → `x11vnc` → `websockify` (wraps VNC as a WebSocket and serves the bundled noVNC client at `WISHLIST_VNC_PORT`). The browser embeds noVNC in an iframe; the user logs into Amazon by hand. Save calls `context.storage_state(path=…)` writing `data/storage_state.json` atomically (tmp + `os.replace`, chmod 0600); teardown kills all subprocesses. A watchdog thread tears the stack down after `WISHLIST_LOGIN_IDLE_TIMEOUT` idle (the page sends heartbeats while active). Note: `DISPLAY` must be set in `os.environ` *before* `sync_playwright().start()` — the driver forks and captures env at that moment.
+
+### Mirror mode (`WISHLIST_ROLE=primary|secondary`)
+
+Two instances, one at each location, but only **one may scrape** — two IPs hitting the same throwaway account is the traffic pattern all the pacing above exists to avoid. A secondary pulls the primary's data into its own SQLite (`app/sync.py` holds both ends of the wire so the payload formats can't drift; `app/sync_client.py` is the pull loop; `app/routes/sync.py` is the HTTP surface). No auth, matching the rest of the app — the export endpoints serve the whole DB, so port 9060 must be firewalled to the peer.
+
+Five invariants. A change that breaks one of these breaks the mirror *silently*:
+
+1. **`price_snapshot` is append-only with a monotonic id, and SQLite is single-writer.** Nothing ever updates or deletes a snapshot or a book (the only `DELETE`s are `services.py`'s `remove_wishlist` and `ingest_wishlist`). So a reader that sees `MAX(id) = M` has necessarily seen every row `<= M` — there is no allocated-but-uncommitted gap — which makes `id > since AND id <= M ORDER BY id` a gap-free window regardless of what the primary does concurrently. **A retention/purge job on `price_snapshot`, or a second process writing the DB, destroys this and the sync goes quietly wrong.**
+2. **The cursor is `MAX(price_snapshot.id)` in the database, never a file.** `data/sync_state.json` is advisory telemetry. A file cursor and the rows it describes are two separate writes: written after the commit it replays a page (harmless), written before it skips one permanently (silent, unrecoverable).
+3. **A secondary must never insert a local snapshot** — enforced in `ingest_wishlist` (raises `MirrorReadOnly`), not at the routes, because `run_full_scrape` has three callers and `ingest_wishlist` is the only function in the app that writes `price_snapshot`. Applying mirrored rows with explicit ids pushes `sqlite_sequence.price_snapshot` to the mirrored max, so a *local* insert would take `max+1` — exactly the id the primary will next hand to a **different** row. `INSERT OR IGNORE` would then discard the real row while the watermark sailed past it: silent, permanent data loss. `sync._warn_id_collision` logs loudly if it ever happens.
+4. **Apply order is fixed by the FKs** (`wishlist` → `book` → `wishlist_book`, then snapshots) **and snapshot pages go strictly ascending.** A partial sync is therefore always a truncated *prefix*, never a set with holes — which is what keeps `prev`-basis drop math honest, since both `_LATEST_BASE`'s `prev` CTE and `price_drop_history` derive their baseline from "the previous `observed_at`". A hole would fabricate a price drop; a short tail merely shows older prices and the next sync fills it in. `export_catalog()` needs its explicit `BEGIN`/`COMMIT` for the same reason — `db.connect()` is `isolation_level=None`, so without it the four reads are four snapshots and can disagree.
+5. **The wholesale catalog replace is "never clobber good data" applied to sync**, so the shrink guard is mandatory, and a refused *or* failed catalog aborts the whole run (fetching snapshots for books that were never applied just takes an FK error mid-page). There is a second guard beside it: a `max_snapshot_id` *below* our own means the source's DB was rebuilt or the peer changed, and is refused outright — left alone, `since_id=<our max>` returns nothing forever and the mirror freezes on stale data behind a green "sync OK".
+
+The secondary syncs on a **daily cron** (`SYNC_HOUR`/`SYNC_MINUTE`, default 08:00 local) plus once at startup — not an interval. The hour has to sit past the end of the primary's run: the primary starts at `SCRAPE_HOUR` and paces one list per `SCRAPE_PER_WISHLIST_SECONDS`, so an N-list run ends around `SCRAPE_HOUR + N` hours, and any list scraped after the sync fires simply lands on the next day's sync. That is a freshness lag, never an inconsistency — a sync is always a coherent prefix (invariant 4).
+
+One bug this exposed and fixed: `_now()` writes naive server-**local** time, so a mirror comparing `last_scraped_at` against its own clock got an age off by the timezone offset — and where it was behind the primary the age went negative and `stale` never fired again, disabling the only honest health column on `/wishlists`. The catalog therefore carries `source_now`, and `list_wishlists(now=...)` takes the primary's clock (see `routes/pages.py:_mirror_now`).
 
 ### Read-side queries & price math
 

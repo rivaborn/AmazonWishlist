@@ -12,6 +12,12 @@ Environment="PLAYWRIGHT_BROWSERS_PATH=/opt/amazon-wishlist/.cache/playwright"
 Environment="PLAYWRIGHT_HOST_PLATFORM_OVERRIDE=ubuntu24.04-x64"
 Environment="HOME=/opt/amazon-wishlist"
 Environment="XDG_RUNTIME_DIR=/tmp/runtime-wishlist"
+# Per-host settings that must NOT live in the repo -- above all WISHLIST_ROLE.
+# install_systemd.sh reinstalls this unit from the repo copy on every deploy, so
+# anything hand-edited into the installed unit is silently reverted by the next
+# `git pull && sudo bash scripts/install_systemd.sh`. The leading `-` makes the
+# file optional, so a single-instance install needs no change at all.
+EnvironmentFile=-/etc/default/amazon-wishlist
 ExecStart=/opt/amazon-wishlist/.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 9060
 Restart=on-failure
 RestartSec=5

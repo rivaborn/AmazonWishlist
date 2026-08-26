@@ -3,6 +3,7 @@
 {% block content %}
 <h2>Wishlists</h2>
 
+{% if not readonly %}
 <section>
   <h3>Add a wishlist</h3>
   <form method="post" action="/api/wishlists" class="add-form">
@@ -16,6 +17,7 @@
   </form>
   <p class="hint">The list must be set to <strong>Public</strong> on Amazon. Edit list → "Sharing" → Public.</p>
 </section>
+{% endif %}
 
 <section>
   <h3>Tracked wishlists ({{ wishlists|length }})</h3>
@@ -42,9 +44,11 @@
         <td>{{ prev if prev is not none else '—' }}</td>
         <td{% if abnormal %} class="abnormal" title="Outside the expected range of the previous count — possible scrape problem"{% elif stale %} class="stale" title="Not refreshed for {{ w.stale_hours | round | int }}h"{% endif %}>{{ cur if w.last_scraped_at else '—' }}</td>
         <td>
+          {% if not readonly %}
           <form method="post" action="/api/wishlists/{{ w.id }}/delete" style="display:inline">
             <button type="submit" class="danger">Remove</button>
           </form>
+          {% endif %}
         </td>
       </tr>
       {% endfor %}
@@ -53,6 +57,68 @@
   {% endif %}
 </section>
 
+{% if readonly %}
+<section id="sync-section">
+  <h3>Mirror status</h3>
+  {# A mirror has two independent freshness questions and an operator needs
+     both: how stale the PRIMARY's scrape is (the table above, computed against
+     the primary's own clock) and how stale our copy of the primary is (here). #}
+  <p>
+    Mirroring <code>{{ sync.primary_url or 'WISHLIST_PRIMARY_URL is not set' }}</code>
+    daily at {{ sync_time }} server time, plus once at startup.
+  </p>
+  <p id="sync-line" class="hint"></p>
+  <button id="sync-btn" class="primary" type="button">Sync now</button>
+</section>
+
+<script>
+(function () {
+  const btn = document.getElementById('sync-btn');
+  const line = document.getElementById('sync-line');
+
+  function ago(sec) {
+    if (sec === null || sec === undefined) return 'never';
+    if (sec < 90) return Math.round(sec) + 's ago';
+    if (sec < 5400) return Math.round(sec / 60) + 'm ago';
+    return Math.round(sec / 3600) + 'h ago';
+  }
+
+  function render(s) {
+    btn.disabled = !!s.running;
+    btn.textContent = s.running ? 'Syncing…' : 'Sync now';
+    if (s.last_error) {
+      line.className = 'hint sync-error';
+      line.textContent = `Last sync failed: ${s.last_error}`;
+      return;
+    }
+    line.className = 'hint sync-ok';
+    line.textContent =
+      `Synced ${ago(s.age_sec)} — ${s.wishlists} wishlists, ${s.books} books, ` +
+      `snapshot watermark ${s.watermark}.`;
+  }
+
+  async function poll() {
+    while (true) {
+      const r = await fetch('/api/sync/status', { headers: { Accept: 'application/json' } });
+      const s = await r.json();
+      render(s);
+      if (!s.running) return;
+      await new Promise(r => setTimeout(r, 1000));
+    }
+  }
+
+  btn.addEventListener('click', async () => {
+    btn.disabled = true;
+    btn.textContent = 'Starting…';
+    await fetch('/api/sync/run', { method: 'POST', headers: { Accept: 'application/json' } });
+    await poll();
+    location.reload();
+  });
+
+  poll();
+})();
+</script>
+{% else %}
 <section id="scrape-section">
   <button id="scrape-btn" class="primary" type="button">Run scrape now</button>
   <div id="scrape-progress" hidden>
@@ -137,4 +203,5 @@
   });
 })();
 </script>
+{% endif %}
 {% endblock %}
