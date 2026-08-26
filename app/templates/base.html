@@ -8,7 +8,18 @@
 </head>
 <body class="{{ 'readonly' if readonly }}">
 <header>
-  <h1>Amazon Wishlist Tracker{% if readonly %} <span class="role-badge">mirror</span>{% endif %}</h1>
+  {# Every page states which instance you are looking at. Two instances serve
+     identical-looking data, so without this it is genuinely impossible to tell
+     the scraper from the mirror -- and "why didn't my change stick?" on the
+     mirror looks exactly like a bug. Derived from is_secondary(), not from the
+     raw WISHLIST_ROLE string, so it always reports actual behaviour. #}
+  <h1>Amazon Wishlist Tracker
+    {% if readonly %}
+      <span class="role-badge role-secondary" title="Read-only mirror{% if primary_url %} of {{ primary_url }}{% endif %} — never scrapes Amazon">secondary</span>
+    {% else %}
+      <span class="role-badge role-primary" title="This instance scrapes Amazon and serves the sync API">primary</span>
+    {% endif %}
+  </h1>
   <nav>
     <a href="/deals" class="{{ 'active' if active == 'deals' }}">Deals</a>
     <a href="/books" class="{{ 'active' if active == 'books' }}">All Books</a>

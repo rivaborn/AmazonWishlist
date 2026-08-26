@@ -23,7 +23,12 @@ def _ctx(extra: dict) -> dict:
     reacts to a failure by silently un-ticking the box again. On a mirror the
     control must not render at all.
     """
-    return {"role": config.ROLE, "readonly": config.is_secondary(), **extra}
+    return {
+        "role": config.ROLE,
+        "readonly": config.is_secondary(),
+        "primary_url": config.PRIMARY_URL,
+        **extra,
+    }
 
 
 def _basis(value: str) -> str:

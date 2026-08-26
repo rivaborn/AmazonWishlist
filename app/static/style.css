@@ -83,6 +83,19 @@ td.cb-col input.purchased-cb:disabled { cursor: progress; }
   text-transform: uppercase;
 }
 
+/* Colour-coded so the two instances are distinguishable at a glance, not just
+   readable: the mirror is the one where writes are refused. */
+.role-badge.role-primary {
+  background: rgba(87, 199, 133, 0.18);
+  color: var(--good);
+  border: 1px solid rgba(87, 199, 133, 0.45);
+}
+.role-badge.role-secondary {
+  background: rgba(255, 180, 58, 0.18);
+  color: var(--accent);
+  border: 1px solid rgba(255, 180, 58, 0.45);
+}
+
 /* One rule instead of an {% if %} in all six tables that emit a .cb-col.
    Hiding it is not cosmetic: the POST behind it is answered 403 on a mirror,
    and the handler's failure path just silently un-ticks the box again. */

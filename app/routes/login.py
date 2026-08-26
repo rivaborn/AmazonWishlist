@@ -43,6 +43,7 @@ def login_page(request: Request):
             "status": mgr.status(),
             "readonly": config.is_secondary(),
             "role": config.ROLE,
+            "primary_url": config.PRIMARY_URL,
         },
     )
 

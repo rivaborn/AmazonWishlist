@@ -527,6 +527,16 @@ def main() -> int:
             print(f"{p:50s} -> {r.status_code} ({len(r.text)} bytes)")
             assert r.status_code == 200, (p, r.status_code, r.text[:200])
 
+        # Every page must state which instance it is -- on BOTH roles.
+        pages = ["/deals", "/books", "/no-price", "/price-drops",
+                 "/purchased", "/wishlists", "/login"]
+        for path in pages:
+            body = c.get(path).text
+            assert 'class="role-badge role-primary"' in body, f"{path}: no primary badge"
+            assert ">primary</span>" in body, f"{path}: badge does not say primary"
+            assert ">secondary</span>" not in body, f"{path}: claims to be secondary"
+        print(f"role badge: {len(pages)} pages say 'primary'")
+
         # /api/scrape/status returns the progress shape, even with no scrape yet
         r = c.get("/api/scrape/status")
         assert r.status_code == 200, r.text
@@ -581,6 +591,13 @@ def main() -> int:
                 r = c.get(path)
                 assert r.status_code == 200, (path, r.status_code, r.text[:200])
                 assert "purchased-cb" not in r.text or 'class="readonly"' in r.text
+            for path in pages:
+                body = c.get(path).text
+                assert 'class="role-badge role-secondary"' in body, f"{path}: no secondary badge"
+                assert ">secondary</span>" in body, f"{path}: badge does not say secondary"
+                assert ">primary</span>" not in body, f"{path}: claims to be primary"
+            print(f"role badge: {len(pages)} pages say 'secondary'")
+
             # The nav must not offer a Login tab a mirror cannot use.
             assert '>Login<' not in c.get("/deals").text
             print("mirror: every page renders read-only, no Login tab")
