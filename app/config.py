@@ -183,3 +183,36 @@ GRIMMORY_LIBRARIES = os.environ.get("GRIMMORY_LIBRARIES", "Amazon fksogbetun,Ama
 # Standalone one-off book catalog DB. Deliberately separate from wishlist.db
 # (different concern, different schema) and gitignored via data/.
 GRIMMORY_DB = Path(os.environ.get("GRIMMORY_DB", DATA_DIR / "grimmory.db"))
+
+
+# ---------- BookBub daily ebook deals (one-off export to booklist.md) ----------
+
+# The daily BookBub email carries an outbound.bookbub.com link that auto-logs
+# the recipient into bookbub.com (signed, single-purpose). It is a session
+# token that rotates, so it is supplied at run time (--link / env) and must
+# never be committed here.
+BOOKBUB_LOGIN_LINK = os.environ.get("BOOKBUB_LOGIN_LINK", "")
+
+# Where the daily deals live. The selected day is a ?date=YYYYMMDD query arg.
+BOOKBUB_DAILY_DEALS_BASE = os.environ.get(
+    "BOOKBUB_DAILY_DEALS_BASE",
+    "https://www.bookbub.com/ebook-deals/daily-deals",
+)
+
+# strftime format for the ?date= value (BookBub uses bare YYYYMMDD).
+BOOKBUB_DATE_FORMAT = os.environ.get("BOOKBUB_DATE_FORMAT", "%Y%m%d")
+
+# Where the markdown report is written. Repo root by default (the deals file is
+# a daily generated report, not app data). The task's "AmazonWhishlist" target
+# path is a typo for this repo folder, so it lands at BASE_DIR/booklist.md.
+BOOKBUB_OUTPUT = Path(os.environ.get("BOOKBUB_OUTPUT", BASE_DIR / "booklist.md"))
+
+
+# ---------- Optional local LLM (normalisation of the parsed deal list) ----------
+
+# The homelab LLMConfig gateway, OpenAI-compatible. Off by default: the
+# deterministic selectolax parse is the deliverable, and an LLM pass must never
+# block the write when a model is absent or the gateway is unreachable.
+LLM_BASE_URL = os.environ.get("LLM_BASE_URL", "http://192.168.1.40:11430/v1")
+LLM_MODEL = os.environ.get("LLM_MODEL", "").strip()
+LLM_TIMEOUT = float(os.environ.get("LLM_TIMEOUT", "120"))
