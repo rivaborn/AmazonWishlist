@@ -382,7 +382,7 @@ Read at run time by `scripts/build_grimmory_db.py` / `app/grimmory.py`. The pass
 | `GRIMMORY_LIBRARIES` | `Amazon fksogbetun,Amazon rivaborn` | Comma-separated names of the libraries to export. |
 | `GRIMMORY_DB` | `data/grimmory.db` | SQLite path of the catalog (gitignored via `data/`). |
 
-## BookBub daily ebook deals (booklist.md)
+## BookBub daily ebook deals (booklist.md + data/deals.db)
 
 A one-off pull of the daily [BookBub](https://www.bookbub.com) ebook-deal list, keyed off the **outbound link in the daily BookBub email**. That link is a signed, single-use auto-login: following it logs you into bookbub.com and lands on that day's daily-deals page. The deals themselves are served from `https://www.bookbub.com/ebook-deals/daily-deals?date=YYYYMMDD`, and any date can be opened in the same logged-in session.
 
@@ -399,7 +399,7 @@ python scripts/build_bookbub_deals.py --link '<outbound link from the daily emai
 - `--out` — report path (default: `booklist.md` at the repo root).
 - `--llm-model` — optional: normalise the list through the local LLM gateway (see below).
 
-The script fetches the deals, then writes the report atomically (tmp + replace), so a failed run never leaves a half-written file. Exit codes: `0` written, `1` fetch/parse error or an empty day, `2` missing `--link`.
+The script fetches the deals, stores them in the deals database (see below), then writes the report atomically (tmp + replace), so a failed run never leaves a half-written file. Exit codes: `0` written, `1` fetch/parse error, an empty day, or a deals-DB write failure, `2` missing `--link`.
 
 A quick probe that prints the day's deals without writing the file (also supports `--headless`/`--headful` if Cloudflare keeps challenging headless):
 
@@ -409,7 +409,27 @@ python -m app.bookbub --link '<outbound link>' [--date YYYYMMDD]
 
 ### Output
 
-`booklist.md` at the repo root — a heading with the date and a table with one row per deal: **title** (linked to the BookBub book page), **author**, and **deal price** (`$X.XX`, or `Free!` for free deals). It is a generated daily report, rewritten on every run.
+`booklist.md` at the repo root — a heading with the date and a table with one row per deal: **title** (linked to the resolved **Amazon Kindle page** — a plain, unlinked title when the deal has no Amazon edition), **author**, and **deal price** (`$X.XX`, or `Free!` for free deals). It is a generated daily report, rewritten on every run.
+
+### Deals database (data/deals.db)
+
+Every deal from a run is also stored in a standalone SQLite database, `data/deals.db` (gitignored via `data/`, separate from `wishlist.db` and `grimmory.db`), so the full history is retained for audit — including deals with no Amazon link and books not owned in the Grimmory libraries. The schema and helpers live in `app/deals_db.py`.
+
+The `deal` table has one row per BookBub deal per day:
+
+| column | meaning |
+| --- | --- |
+| `id` | primary key (autoincrement). |
+| `date` | the deals day, `YYYYMMDD`. |
+| `title` / `author` | the deal's title and author(s). |
+| `deal_price` / `original_price` | the sale price and the strikethrough retail price. |
+| `bookbub_url` | the BookBub book page — kept for audit only, not shown in `booklist.md`. |
+| `amazon_url` | the resolved Amazon Kindle page (`amazon.com/dp/…`), followed out from the deal card's Amazon retailer button; **NULL when the book has no Amazon edition**. |
+| `no_amazon_link` | `1` when `amazon_url` is NULL (no Amazon link saved), else `0`. |
+| `owned_in_grimmory` | `1` owned / `0` not owned / **NULL when `grimmory.db` is unavailable**. An approximate normalised title+author match against `data/grimmory.db` — kept in the DB so a human can audit its accuracy. |
+| `audited_at` | ISO timestamp of when the row was last written. |
+
+Rows are keyed by a UNIQUE index on `(date, bookbub_url)`. Re-running the same date **upserts** that day's rows (refreshed, never duplicated); rows for other dates are never deleted, so the history is kept for audit. The ownership lookup reads `grimmory.db` read-only and is approximate on purpose (normalised title **and** author must both match).
 
 ### Configuration (env vars)
 
@@ -421,6 +441,7 @@ The session link is never committed (it is a rotating signed token). The `BOOKBU
 | `BOOKBUB_DAILY_DEALS_BASE` | `https://www.bookbub.com/ebook-deals/daily-deals` | Daily-deals page; the day is the `?date=YYYYMMDD` query arg. |
 | `BOOKBUB_DATE_FORMAT` | `%Y%m%d` | strftime format of the `?date=` value. |
 | `BOOKBUB_OUTPUT` | `booklist.md` (repo root) | Where the report is written. |
+| `DEALS_DB` | `data/deals.db` | The deals database (gitignored via `data/`): each day's deals, resolved Amazon links, and the owned-in-grimmory audit. |
 | `LLM_BASE_URL` | `http://192.168.1.40:11430/v1` | Local LLMConfig gateway (OpenAI-compatible) used for optional normalisation. |
 | `LLM_MODEL` | *(unset = off)* | Model for `--llm-model`. The deterministic parse is the deliverable — an unavailable model/gateway only logs a warning and writes the parsed list as-is. |
 | `LLM_TIMEOUT` | `120` | Timeout (seconds) for the LLM call. |
