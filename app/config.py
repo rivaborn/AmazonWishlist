@@ -207,6 +207,12 @@ BOOKBUB_DATE_FORMAT = os.environ.get("BOOKBUB_DATE_FORMAT", "%Y%m%d")
 # path is a typo for this repo folder, so it lands at BASE_DIR/booklist.md.
 BOOKBUB_OUTPUT = Path(os.environ.get("BOOKBUB_OUTPUT", BASE_DIR / "booklist.md"))
 
+# Deals database: one row per BookBub deal (the day's page), plus the resolved
+# Amazon Kindle link (when the deal has one), an owned-in-grimmory flag, and
+# audit notes. Deliberately separate from wishlist.db and grimmory.db and
+# gitignored via data/. Re-runs upsert per date; history is kept for audit.
+DEALS_DB = Path(os.environ.get("DEALS_DB", DATA_DIR / "deals.db"))
+
 
 # ---------- Optional local LLM (normalisation of the parsed deal list) ----------
 
