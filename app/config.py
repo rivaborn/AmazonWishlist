@@ -254,3 +254,23 @@ LLM_TIMEOUT = float(os.environ.get("LLM_TIMEOUT", "120"))
 # fallback, and the navigation timeout (ms) before giving up on one book.
 AMAZON_LLM_TEXT_CAP = int(os.environ.get("AMAZON_LLM_TEXT_CAP", "6000"))
 AMAZON_NAV_TIMEOUT_MS = int(os.environ.get("AMAZON_NAV_TIMEOUT_MS", "45000"))
+
+# ---------- NordVPN CLI wrapper (app/nordvpn.py) ----------
+# Path to the `nordvpn` CLI (override with NORDVPN_CLI if it is not on PATH).
+# Credentials are read ONLY from the NORDVPN_USERNAME / NORDVPN_PASSWORD env
+# (or --nord-user / --nord-pass) — never from a committed file or a default here.
+# NORDVPN_COUNTRIES is the pool of exit countries `rotate()` cycles through so
+# each rotation lands on a different server/exit IP; NORDVPN_CITIES (optional)
+# adds a per-rotation city for finer variation.
+NORDVPN_CLI = os.environ.get("NORDVPN_CLI", "nordvpn")
+NORDVPN_COUNTRIES = [
+    c.strip()
+    for c in os.environ.get(
+        "NORDVPN_COUNTRIES",
+        "United States,Germany,Japan,United Kingdom,Canada,Australia",
+    ).split(",")
+    if c.strip()
+]
+NORDVPN_CITIES = [
+    c.strip() for c in os.environ.get("NORDVPN_CITIES", "").split(",") if c.strip()
+]
