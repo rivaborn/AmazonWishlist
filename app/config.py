@@ -162,3 +162,24 @@ SYNC_PAGE_LIMIT_MAX = 10000
 # Advisory telemetry only -- the sync cursor is MAX(price_snapshot.id) in the DB,
 # never this file. See app/sync.py.
 SYNC_STATE_PATH = Path(os.environ.get("WISHLIST_SYNC_STATE", DATA_DIR / "sync_state.json"))
+
+
+# ---------- Grimmory book catalog (one-off build of data/grimmory.db) ----------
+
+# Host serving the BookLore/Grimmory instance (the home-lab book library
+# manager at 192.168.1.13:6060). Kept as-given (trailing slash included); the
+# client strips/normalises when joining API paths.
+GRIMMORY_URL = os.environ.get("GRIMMORY_URL", "http://192.168.1.13:6060/")
+
+# Login user for /api/v1/auth/login. No defaults for the credentials: the
+# password is a real secret and must be supplied at run time via the
+# environment, never committed in this file.
+GRIMMORY_USERNAME = os.environ.get("GRIMMORY_USERNAME", "").strip()
+GRIMMORY_PASSWORD = os.environ.get("GRIMMORY_PASSWORD", "")
+
+# Comma-separated names of the Grimmory libraries to export into the book DB.
+GRIMMORY_LIBRARIES = os.environ.get("GRIMMORY_LIBRARIES", "Amazon fksogbetun,Amazon rivaborn")
+
+# Standalone one-off book catalog DB. Deliberately separate from wishlist.db
+# (different concern, different schema) and gitignored via data/.
+GRIMMORY_DB = Path(os.environ.get("GRIMMORY_DB", DATA_DIR / "grimmory.db"))

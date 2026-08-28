@@ -3,6 +3,9 @@ __pycache__/
 .venv/
 venv/
 data/
+# Explicitly ignore the one-off Grimmory book catalog build (already covered by
+# the data/ rule; named here so it is unambiguous it never lands in git).
+data/grimmory.db
 *.db
 *.log
 .env
