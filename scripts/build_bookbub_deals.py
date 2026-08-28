@@ -30,7 +30,6 @@ import os
 import sqlite3
 import sys
 import tempfile
-from datetime import datetime
 from pathlib import Path
 
 # `python scripts/build_bookbub_deals.py` puts scripts/ on sys.path[0], so make
@@ -150,30 +149,6 @@ def _write_atomic(path: Path, content: str) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Deals database (audit store)
-# --------------------------------------------------------------------------- #
-def _store_deals(deals: list, date: str) -> tuple[int, int, int]:
-    """Store the deals in ``DEALS_DB`` (idempotent upsert per date).
-
-    Computes the owned-in-grimmory audit (NULL when grimmory.db is absent) and
-    writes every deal for ``date``. Returns ``(stored, owned, no_amazon)``.
-    Raises on a database error (the caller reports it and exits non-zero).
-    """
-    owned_map = deals_db.owned_lookup(deals, GRIMMORY_DB)
-    audited_at = datetime.now().isoformat(timespec="seconds")
-    conn = deals_db.connect(DEALS_DB)
-    try:
-        deals_db.ensure_schema(conn)
-        stored = deals_db.upsert_deals(conn, deals, date, owned_map, audited_at)
-        conn.commit()
-    finally:
-        conn.close()
-    owned = sum(1 for v in owned_map.values() if v == 1)
-    no_amazon = sum(1 for d in deals if not d.amazon_url)
-    return stored, owned, no_amazon
-
-
-# --------------------------------------------------------------------------- #
 # main
 # --------------------------------------------------------------------------- #
 def main(argv: list[str] | None = None) -> int:
@@ -209,7 +184,9 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     try:
-        stored, owned, no_amazon = _store_deals(deals, date)
+        stored, owned, no_amazon = deals_db.store_deals(
+            deals, date, deals_path=DEALS_DB, grimmory_path=GRIMMORY_DB
+        )
     except sqlite3.Error as e:
         print(f"ERROR: failed to store deals in {DEALS_DB}: {e}", file=sys.stderr)
         return 1

@@ -20,6 +20,7 @@ Design notes
 """
 from __future__ import annotations
 
+import datetime as _dt
 import re
 import sqlite3
 from pathlib import Path
@@ -31,6 +32,7 @@ __all__ = [
     "normalise",
     "owned_lookup",
     "upsert_deals",
+    "store_deals",
 ]
 
 # --------------------------------------------------------------------------- #
@@ -169,3 +171,28 @@ def upsert_deals(conn: sqlite3.Connection, deals, date: str, owned_map: dict, au
         )
         n += 1
     return n
+
+
+def store_deals(deals, date: str, *, deals_path: str | Path, grimmory_path: str | Path,
+                audited_at: str | None = None) -> tuple[int, int, int]:
+    """Store the deals for ``date`` in ``deals_path`` (idempotent upsert).
+
+    Opens the deals database, ensures the schema, computes the
+    owned-in-grimmory audit (``None``/NULL when ``grimmory_path`` is absent),
+    and upserts every deal for ``date``. ``audited_at`` defaults to the current
+    local time (ISO, second precision). Returns ``(stored, owned, no_amazon)``.
+    Raises on a database error.
+    """
+    owned_map = owned_lookup(deals, grimmory_path)
+    if audited_at is None:
+        audited_at = _dt.datetime.now().isoformat(timespec="seconds")
+    conn = connect(deals_path)
+    try:
+        ensure_schema(conn)
+        stored = upsert_deals(conn, deals, date, owned_map, audited_at)
+        conn.commit()
+    finally:
+        conn.close()
+    owned = sum(1 for v in owned_map.values() if v == 1)
+    no_amazon = sum(1 for d in deals if not d.amazon_url)
+    return stored, owned, no_amazon
