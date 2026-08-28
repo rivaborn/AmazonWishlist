@@ -431,6 +431,24 @@ The `deal` table has one row per BookBub deal per day:
 
 Rows are keyed by a UNIQUE index on `(date, bookbub_url)`. Re-running the same date **upserts** that day's rows (refreshed, never duplicated); rows for other dates are never deleted, so the history is kept for audit. The ownership lookup reads `grimmory.db` read-only and is approximate on purpose (normalised title **and** author must both match).
 
+### Backfilling historical dates
+
+`scripts/backfill_bookbub_deals.py` backfills the deals database over a range of past dates, day by day (default `20260613..20260826`, i.e. back from the newest day to the oldest). The single-day builder above only covers one day per run:
+
+```bash
+python scripts/backfill_bookbub_deals.py --link '<outbound link from the daily email>' [--start YYYYMMDD] [--end YYYYMMDD] [--dry-run]
+```
+
+- `--link` — the same rotating outbound link as the builder (required).
+- `--start` / `--end` — newest / oldest day to process, inclusive (defaults from `BOOKBUB_BACKFILL_START` / `BOOKBUB_BACKFILL_END`).
+- `--dry-run` — print the date list and current per-date status without fetching anything.
+
+One login session covers a *chunk* of dates (default 5) and navigates `?date=YYYYMMDD` inside it — one Cloudflare login instead of one per day. The backfill writes **only** to `data/deals.db` (it never touches `booklist.md`), storing through the same `store_deals` path as the builder: ownership is audited against `grimmory.db` and `no_amazon_link` is set when a deal has no Amazon edition.
+
+It is **idempotent and resumable**: after every date a per-date status (`ok` / `empty` / `challenge` / `error` + deal count + timestamp) is mirrored to `data/backfill_progress.json` (atomic tmp+replace), and dates already present in `deals.db` are treated as done at startup — a killed run resumes where it stopped and a re-run is a fast no-op over days already recorded.
+
+**Cloudflare monitoring**: a day whose page is still on the interstitial after the wait is recorded `challenge` — retriable on the next run, deliberately *not* marked `empty`; a page with no deal cards is recorded `empty` (a day BookBub no longer serves; not retried); and under Cloudflare pressure (challenged pages or consecutive bad days) the between-sessions backoff doubles to let the block cool down. A login whose challenge never clears aborts the run cleanly — re-run later with a fresh `--link`.
+
 ### Configuration (env vars)
 
 The session link is never committed (it is a rotating signed token). The `BOOKBUB_*` / `LLM_*` settings in `app/config.py`:
@@ -442,6 +460,12 @@ The session link is never committed (it is a rotating signed token). The `BOOKBU
 | `BOOKBUB_DATE_FORMAT` | `%Y%m%d` | strftime format of the `?date=` value. |
 | `BOOKBUB_OUTPUT` | `booklist.md` (repo root) | Where the report is written. |
 | `DEALS_DB` | `data/deals.db` | The deals database (gitignored via `data/`): each day's deals, resolved Amazon links, and the owned-in-grimmory audit. |
+| `BOOKBUB_BACKFILL_START` | `20260826` | Newest day the backfill processes, `YYYYMMDD`. |
+| `BOOKBUB_BACKFILL_END` | `20260613` | Oldest day the backfill processes, `YYYYMMDD` (inclusive). |
+| `BOOKBUB_BACKFILL_CHUNK` | `5` | Dates per login session (re-login between chunks). |
+| `BOOKBUB_BACKFILL_DELAY` | `3` | Seconds between date navigations within a session (jittered ±25%). |
+| `BOOKBUB_BACKFILL_BACKOFF` | `30` | Seconds to sleep between sessions; doubled when Cloudflare re-challenges are detected. |
+| `BOOKBUB_BACKFILL_PROGRESS` | `data/backfill_progress.json` | Per-date status mirror for resuming (atomic writes; gitignored via `data/`). |
 | `LLM_BASE_URL` | `http://192.168.1.40:11430/v1` | Local LLMConfig gateway (OpenAI-compatible) used for optional normalisation. |
 | `LLM_MODEL` | *(unset = off)* | Model for `--llm-model`. The deterministic parse is the deliverable — an unavailable model/gateway only logs a warning and writes the parsed list as-is. |
 | `LLM_TIMEOUT` | `120` | Timeout (seconds) for the LLM call. |
