@@ -19,9 +19,11 @@ fi
 # Login-tab infrastructure: virtual X display, VNC, and the noVNC web client.
 # (Chromium's own runtime deps are installed by `playwright install --with-deps`
 #  below — that picks the right package set per Ubuntu version.)
+# Plus the wlvpn tunnel's hard deps: wireguard-tools (the `wg` tool) and curl
+# (the namespace egress check in scripts/vpn_netns_up.sh).
 DEBIAN_FRONTEND=noninteractive apt-get update
 DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-  xvfb x11vnc websockify novnc
+  xvfb x11vnc websockify novnc curl wireguard-tools
 
 mkdir -p "$APP_DIR"
 # NOTE: .cache MUST be excluded — it holds the Playwright chromium browser, which
@@ -72,11 +74,46 @@ fi
 mkdir -p "$APP_DIR/data/.chrome-login" "$APP_DIR/data/diagnostics"
 chown -R "$APP_USER:$APP_USER" "$APP_DIR"
 
+# ---- wlvpn NordVPN tunnel prerequisites (optional for the app itself) -------
+# WireGuard kernel module: built into stock Ubuntu 22.04+ kernels, but load it
+# on boxes where it ships as a module. Tolerated: a missing module only breaks
+# the tunnel, never the app.
+modprobe wireguard 2>/dev/null || \
+  echo "note: 'modprobe wireguard' failed — if the module is missing, the wlvpn tunnel cannot come up" >&2
+
+# The nordvpn CLI ships as a .deb from Nord, not a distro package, and its
+# versioned filename changes over time, so this is best-effort: a stale URL
+# must never abort a deploy (the service restart below is what ships the code).
+# After (re)install, the operator must log in ONCE as WISHLIST_VPN_USER:
+#   nordvpn login --token <TOKEN>
+# (the token comes from the NordVPN account; the credentials are never stored
+# in this repo — the tunnel only reads the session back out of the nordlynx
+# interface). Set NORDVPN_DEB_URL to override the pinned .deb.
+NORDVPN_DEB_URL="${NORDVPN_DEB_URL:-https://repo.nordvpn.com/deb/nordvpn/stable/lucid/pool/main/n/nordvpn/nordvpn_6.4-1_all.deb}"
+if command -v nordvpn >/dev/null 2>&1; then
+  echo "nordvpn CLI already present: $(command -v nordvpn)"
+elif ! (curl -fsSL "$NORDVPN_DEB_URL" -o /tmp/nordvpn.deb && dpkg -i /tmp/nordvpn.deb); then
+  echo "WARNING: could not install the nordvpn CLI from $NORDVPN_DEB_URL" >&2
+  echo "         (stale versioned URL or network block). Install it manually from" >&2
+  echo "         https://repo.nordvpn.com/deb/nordvpn/, run 'nordvpn login --token <TOKEN>'" >&2
+  echo "         as WISHLIST_VPN_USER, then 'systemctl restart amazon-wishlist-vpn.service'." >&2
+fi
+rm -f /tmp/nordvpn.deb
+
 install -m 644 "$APP_DIR/amazon-wishlist.service" /etc/systemd/system/amazon-wishlist.service
+# The wlvpn tunnel unit: persists the namespace at boot so the live-deal
+# verifier can run inside it. Its start is best-effort — until the operator has
+# run `nordvpn login --token` it cannot come up, and that must never block a
+# deploy (the up script also exits 1 with a clear message when its
+# prerequisites are missing; StartLimitBurst bounds the boot-race retries).
+install -m 644 "$APP_DIR/amazon-wishlist-vpn.service" /etc/systemd/system/amazon-wishlist-vpn.service
 systemctl daemon-reload
 systemctl enable amazon-wishlist.service
+systemctl enable amazon-wishlist-vpn.service
 systemctl restart amazon-wishlist.service
+systemctl start amazon-wishlist-vpn.service || true
 systemctl status --no-pager amazon-wishlist.service || true
+systemctl status --no-pager amazon-wishlist-vpn.service || true
 
 echo
 echo "Installed. Visit http://<host>:9060/"

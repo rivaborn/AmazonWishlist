@@ -1,0 +1,59 @@
+# Per-process NordVPN egress for the Amazon Wishlist live-deal verifier.
+#
+# Brings up the `wlvpn` network namespace with a NordLynx (WireGuard) tunnel at
+# boot, so ONLY processes placed in that namespace (scripts/verify_deals.py,
+# run via amazon-wishlist-verify.service / scripts/vpn_verify.sh) egress through
+# NordVPN; the rest of the box (SSH, LAN, the wishlist scraper itself) keeps its
+# normal connection.
+#
+# Type=oneshot + RemainAfterExit so the namespace persists as a dependency
+# target for the consumer units. scripts/vpn_netns_up.sh is idempotent (it
+# adopts a live namespace and only rebuilds a stale one); its ExecStop partner
+# is scripts/vpn_netns_down.sh.
+#
+# Prerequisites: the nordvpn CLI installed + logged in for WISHLIST_VPN_USER
+# (`nordvpn login --token <TOKEN>`, once — see install_systemd.sh), and
+# wireguard-tools. Per-host settings go in /etc/default/amazon-wishlist
+# (WISHLIST_VPN_USER / WISHLIST_VPN_LAN_SUBNET / WISHLIST_VPN_NS /
+# WISHLIST_VPN_IFACE / WISHLIST_VPN_DNS) — install_systemd.sh reinstalls this
+# unit from the repo on every deploy, so anything hand-edited here is reverted.
+
+[Unit]
+Description=Amazon Wishlist NordVPN WireGuard namespace (wlvpn)
+After=network-online.target nordvpnd.service
+Wants=network-online.target
+Requires=nordvpnd.service
+# Retry a lost boot race instead of stranding every consumer.
+# nordvpnd going ACTIVE is not the same as nordvpnd being READY to connect: a
+# consumer that runs `nordvpn connect` seconds too early dies with "Unable to
+# access interface: No such device" because the nordlynx iface does not exist
+# yet. Because the consumer (amazon-wishlist-verify) is Requires= + BindsTo=
+# this unit, a loss here fails ITS start job with result "dependency", which
+# never enters the service, so its own Restart= never applies and NOTHING
+# retries it. Retrying here fixes that at the source rather than in each
+# consumer.
+StartLimitIntervalSec=600
+StartLimitBurst=5
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# Per-host values (WISHLIST_VPN_USER, WISHLIST_VPN_LAN_SUBNET, ...). Optional:
+# the leading `-` means an install that keeps the script defaults needs no such
+# file.
+EnvironmentFile=-/etc/default/amazon-wishlist
+# Root: ip netns / ip link / wg set need CAP_NET_ADMIN.
+ExecStart=/bin/bash /opt/amazon-wishlist/scripts/vpn_netns_up.sh
+ExecStop=/bin/bash /opt/amazon-wishlist/scripts/vpn_netns_down.sh
+# Verified on systemd 255: Restart= IS honoured for Type=oneshot, contrary to
+# the common belief that it is ignored. Five attempts, 20 s apart, covers a boot
+# race that resolves in seconds; a genuinely broken nordvpnd still gives up
+# rather than looping forever.
+Restart=on-failure
+RestartSec=20
+# The up script waits up to 20 s for the nordlynx iface, then connect + harvest
+# + rebuild + a 15 s egress curl; 180 s is a generous ceiling.
+TimeoutStartSec=180
+
+[Install]
+WantedBy=multi-user.target
