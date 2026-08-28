@@ -81,6 +81,8 @@ from app.config import (  # noqa: E402
     VERIFY_MAX_RETRIES,
     VERIFY_PROGRESS,
     VERIFY_RETRY_BACKOFF,
+    VERIFY_TUNNEL_RETRIES,
+    VERIFY_TUNNEL_RETRY_DELAY,
     WISHLIST_VPN_UNIT,
 )
 
@@ -180,12 +182,16 @@ def _tunnel_live(ns: str) -> bool:
     verifier does not have. A dead/stale tunnel therefore never causes Amazon
     traffic to egress from the host's plain IP.
 
-    A transient blip (one failed check) is retried once before we give up, so a
-    momentary jitter does not abort a multi-hour run.
+    A transient blip (one failed check) is retried several times over a short
+    window (VERIFY_TUNNEL_RETRIES / _RETRY_DELAY, default ~60s) before we give
+    up, so a momentary Nord rekey/reconnect does not abort a multi-hour run —
+    but while egress is down NO Amazon read happens (the gate blocks first) and
+    the run stops rather than continue once the window is exhausted.
     """
-    if nordvpn.tunnel_egress_ip():
-        return True
-    time.sleep(5.0)  # a transient blip may clear itself
+    for _ in range(VERIFY_TUNNEL_RETRIES):
+        if nordvpn.tunnel_egress_ip():
+            return True
+        time.sleep(VERIFY_TUNNEL_RETRY_DELAY)
     return nordvpn.tunnel_egress_ip() is not None
 
 

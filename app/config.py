@@ -307,6 +307,13 @@ VERIFY_DELAY_MIN = float(os.environ.get("VERIFY_DELAY_MIN", "2"))
 VERIFY_DELAY_MAX = float(os.environ.get("VERIFY_DELAY_MAX", "6"))
 VERIFY_MAX_RETRIES = int(os.environ.get("VERIFY_MAX_RETRIES", "2"))
 VERIFY_RETRY_BACKOFF = float(os.environ.get("VERIFY_RETRY_BACKOFF", "20"))
+# Tunnel-mode liveness gate (scripts/verify_deals.py _tunnel_live): how many
+# egress checks (with VERIFY_TUNNEL_RETRY_DELAY seconds between) the fail-closed
+# gate runs before aborting on a lost tunnel. A transient Nord rekey/reconnect
+# blip must not abort a many-hour run, but no Amazon access happens while egress
+# is down (the gate blocks before every read). Defaults ~60s total.
+VERIFY_TUNNEL_RETRIES = int(os.environ.get("VERIFY_TUNNEL_RETRIES", "4"))
+VERIFY_TUNNEL_RETRY_DELAY = float(os.environ.get("VERIFY_TUNNEL_RETRY_DELAY", "15"))
 # Advisory progress mirror (atomic tmp+replace telemetry). The source of truth
 # for "what is pending" is deal_status in DEALS_DB, never this file.
 VERIFY_PROGRESS = Path(os.environ.get("VERIFY_PROGRESS", DATA_DIR / "verify_progress.json"))
