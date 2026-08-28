@@ -16,7 +16,8 @@ Flow (mirrors the httpx<->playwright fallback used elsewhere in this app):
   1. Follow the outbound link — it logs the visitor in and lands on the
      daily-deals page (the link itself carries the target ``?date=``).
   2. Navigate (same session) to ``/ebook-deals/daily-deals?date=YYYYMMDD``.
-  3. Parse each deal card: title, author(s), deal price, book URL.
+  3. Parse each deal card: title, author(s), deal price, book URL, and the
+     Amazon Kindle link (resolved from the card's Amazon retailer button).
 """
 
 from __future__ import annotations
@@ -65,6 +66,10 @@ AUTHORS = ".book-info-authors a[href*='/authors/']"
 DEAL_PRICE = ".deal-price .discount-price"
 FREE_PRICE = ".discount-price-free"
 ORIGINAL_PRICE = ".deal-price .original-price"
+# BookBub's Amazon retailer id. A deal card's Amazon button is an anchor whose
+# href is `.../promotion_site_active_check/{id}?promotion_type=deals&retailer_id=1`
+# and which 302-redirects (a plain GET) to the Amazon Kindle product page.
+AMAZON_RETAILER_HREF_MARK = "retailer_id=1"
 
 
 class BookbubError(RuntimeError):
@@ -77,11 +82,32 @@ class Deal:
     author: str
     price: str
     url: str
+    # The Amazon link for the deal. parse_deals() captures the BookBub
+    # intermediate (retailer_id=1) href; resolve_amazon_urls() rewrites it to
+    # the final amazon.com Kindle page. None when the card has no Amazon
+    # retailer (a "no amazon link" deal).
+    amazon_url: str | None = None
+    original_price: str = ""
 
 
 # --------------------------------------------------------------------------- #
 # Parsing
 # --------------------------------------------------------------------------- #
+def _amazon_anchor(card):
+    """Return the Amazon retailer anchor in a deal card, or None.
+
+    Prefers the anchor carrying ``retailer_id=1`` (BookBub's Amazon slot);
+    falls back to a button whose label is "Amazon".
+    """
+    anchor = card.css_first(f"a[href*='{AMAZON_RETAILER_HREF_MARK}']")
+    if anchor is not None:
+        return anchor
+    for a in card.css("a"):
+        if (a.text(strip=True) or "").strip().lower() == "amazon":
+            return a
+    return None
+
+
 def parse_deals(html: str) -> list[Deal]:
     """Parse deal cards out of a rendered daily-deals page.
 
@@ -111,11 +137,27 @@ def parse_deals(html: str) -> list[Deal]:
             price_el = card.css_first(FREE_PRICE)
         price = price_el.text(strip=True) if price_el is not None else ""
 
+        orig_el = card.css_first(ORIGINAL_PRICE)
+        original_price = orig_el.text(strip=True) if orig_el is not None else ""
+
+        amz = _amazon_anchor(card)
+        amz_href = amz.attributes.get("href", "") if (amz is not None and amz.attributes) else ""
+        amazon_url = urljoin(_BASE, amz_href) if amz_href else None
+
         key = url or f"{title}|{author}|{price}"
         if key in seen:
             continue
         seen.add(key)
-        deals.append(Deal(title=title, author=author, price=price, url=url))
+        deals.append(
+            Deal(
+                title=title,
+                author=author,
+                price=price,
+                url=url,
+                amazon_url=amazon_url,
+                original_price=original_price,
+            )
+        )
     return deals
 
 
@@ -252,6 +294,33 @@ def fetch_daily_deals_playwright(link: str, date: str, headless: bool = True) ->
     return parse_deals(html)
 
 
+def resolve_amazon_urls(deals: list[Deal], *, timeout: float = 30.0) -> list[Deal]:
+    """Best-effort: turn each deal's BookBub intermediate Amazon link into the
+    final amazon.com Kindle page URL via a follow_redirects GET.
+
+    Never raises — a failed or non-Amazon resolution keeps the intermediate
+    URL (or None), so the fetch always succeeds and the link is retained for
+    audit. Mutates and returns ``deals``.
+    """
+    if not deals:
+        return deals
+    client = httpx.Client(headers=HEADERS, follow_redirects=True, timeout=timeout)
+    try:
+        for d in deals:
+            if not d.amazon_url:
+                continue
+            try:
+                resp = client.get(d.amazon_url)
+            except httpx.HTTPError:
+                continue
+            host = (resp.url.host or "").lower()
+            if "amazon" in host:
+                d.amazon_url = str(resp.url)
+    finally:
+        client.close()
+    return deals
+
+
 # --------------------------------------------------------------------------- #
 # Public entry point
 # --------------------------------------------------------------------------- #
@@ -266,32 +335,36 @@ def fetch_daily_deals(date: str, link: str | None = None, headless: bool | None 
     if not link:
         raise BookbubError("no BookBub login link: pass --link or set BOOKBUB_LOGIN_LINK")
 
+    deals: list[Deal] = []
+
     # Fast path — only useful if Cloudflare isn't interstitial-ing us.
     try:
         deals = fetch_daily_deals_httpx(link, date)
-        if deals:
-            return deals
     except BookbubError:
-        pass
+        deals = []
 
     # Browser fallback — the path that actually clears Cloudflare.
-    modes = [headless] if headless is not None else [True, False]
-    last_err: Exception | None = None
-    for mode in modes:
-        try:
-            deals = fetch_daily_deals_playwright(link, date, headless=mode)
-        except Exception as e:  # noqa: BLE001 - surface a clean error below
-            last_err = e
-            continue
-        if deals:
-            return deals
-    raise BookbubError(
-        f"no BookBub deals found for {date} (httpx and the browser "
-        f"{'both headless and headful' if len(modes) > 1 else f'browser (headless={modes[0]})'} "
-        f"all returned nothing"
-        + (f"; last error: {last_err}" if last_err else "")
-        + " — the outbound link may be stale/expired or Cloudflare may have challenged the browser)"
-    )
+    if not deals:
+        modes = [headless] if headless is not None else [True, False]
+        last_err: Exception | None = None
+        for mode in modes:
+            try:
+                deals = fetch_daily_deals_playwright(link, date, headless=mode)
+            except Exception as e:  # noqa: BLE001 - surface a clean error below
+                last_err = e
+                continue
+            if deals:
+                break
+        if not deals:
+            raise BookbubError(
+                f"no BookBub deals found for {date} (httpx and the browser "
+                f"{'both headless and headful' if len(modes) > 1 else f'browser (headless={modes[0]})'} "
+                f"all returned nothing"
+                + (f"; last error: {last_err}" if last_err else "")
+                + " — the outbound link may be stale/expired or Cloudflare may have challenged the browser)"
+            )
+
+    return resolve_amazon_urls(deals)
 
 
 # --------------------------------------------------------------------------- #
@@ -333,7 +406,11 @@ def main(argv: list[str] | None = None) -> int:
     for i, d in enumerate(deals, 1):
         print(f"{i}. {d.title} — {d.author} — {d.price}")
         if d.url:
-            print(f"   {d.url}")
+            print(f"   bookbub: {d.url}")
+        if d.amazon_url:
+            print(f"   amazon:  {d.amazon_url}")
+        else:
+            print("   amazon:  (no amazon link)")
     print(f"\n{len(deals)} deals for {date}")
     return 0
 
