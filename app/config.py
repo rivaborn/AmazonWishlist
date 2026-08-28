@@ -282,6 +282,22 @@ NORDVPN_START_COUNTRY = os.environ.get(
 # scripts/verify_deals.py --rotate-every default).
 NORDVPN_ROTATE_EVERY = int(os.environ.get("NORDVPN_ROTATE_EVERY", "10"))
 
+# ---------- NordVPN netns tunnel (app/nordvpn.py "tunnel mode") ----------
+# The Ubuntu deployment puts the live-deal verifier INSIDE a network namespace
+# whose only route is a NordLynx (WireGuard) tunnel — scripts/vpn_netns_up.sh /
+# vpn_netns_down.sh + amazon-wishlist-vpn.service (see README). These knobs
+# must match the tunnel unit's /etc/default/amazon-wishlist values so
+# `verify_deals.py --netns <NS>` addresses the same namespace the unit builds.
+# No credentials here: the session is pre-negotiated by the tunnel unit as
+# WISHLIST_VPN_USER (the nordvpn CLI's operator user).
+WISHLIST_VPN_NS = os.environ.get("WISHLIST_VPN_NS", "wlvpn")
+WISHLIST_VPN_IFACE = os.environ.get("WISHLIST_VPN_IFACE", "wlwg")
+WISHLIST_VPN_UNIT = os.environ.get("WISHLIST_VPN_UNIT", "amazon-wishlist-vpn.service")
+# Where the egress checks point (must be reachable through the tunnel's DNS).
+WISHLIST_VPN_ENDPOINT = os.environ.get(
+    "WISHLIST_VPN_ENDPOINT", "https://api.ipify.org"
+)
+
 # ---------- Live-deal verification pacing (scripts/verify_deals.py) ----------
 # Random jitter (seconds) between per-book Amazon reads (anti-bot pacing, the
 # same idea as the wishlist scraper's REQUEST_DELAY_MIN/MAX), the per-book retry

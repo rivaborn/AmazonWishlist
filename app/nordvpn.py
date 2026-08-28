@@ -21,6 +21,13 @@ or not connectable, :func:`_run` raises :class:`NordvpnError` with the clear
 underlying reason — this is an environment prerequisite for the live-deal
 verification, not something to paper over. Pacing / anti-bot and the
 per-N-books invocation live in the orchestrator, not here.
+
+There is a second, "tunnel mode" section (``netns_exists`` / ``tunnel_egress_ip``
+/ ``netns_egress_ok`` / ``rebuild_tunnel`` / ``tunnel_rotate``) for the Ubuntu
+deployment, where the verifier runs INSIDE a network namespace whose only
+route is a NordLynx (WireGuard) tunnel (scripts/vpn_netns_up.sh +
+amazon-wishlist-vpn.service). That path needs no CLI or credentials and never
+raises — a missing tool is a clean False/None the caller logs.
 """
 
 from __future__ import annotations
@@ -31,8 +38,16 @@ import re
 import shutil
 import subprocess
 from dataclasses import dataclass, field
+from pathlib import Path
 
-from .config import NORDVPN_CITIES, NORDVPN_CLI, NORDVPN_COUNTRIES
+from .config import (
+    NORDVPN_CITIES,
+    NORDVPN_CLI,
+    NORDVPN_COUNTRIES,
+    WISHLIST_VPN_ENDPOINT,
+    WISHLIST_VPN_NS,
+    WISHLIST_VPN_UNIT,
+)
 
 __all__ = [
     "NordvpnError",
@@ -45,6 +60,11 @@ __all__ = [
     "ip",
     "rotate",
     "reset_rotation",
+    "netns_exists",
+    "tunnel_egress_ip",
+    "netns_egress_ok",
+    "rebuild_tunnel",
+    "tunnel_rotate",
 ]
 
 log = logging.getLogger("nordvpn")
@@ -214,6 +234,150 @@ def rotate() -> str:
         raise NordvpnError("rotate(): connect succeeded but no exit IP was readable")
     if new_ip == cur.ip:
         log.warning("rotate(): exit IP unchanged (%s) — the server may reuse the same range", new_ip)
+    return new_ip
+
+
+# ---------- Tunnel mode (netns-based) ----------------------------------------
+# On Ubuntu the live-deal verifier runs INSIDE a network namespace whose only
+# route is a NordLynx (WireGuard) tunnel (scripts/vpn_netns_up.sh +
+# amazon-wishlist-vpn.service). Inside that namespace there is no host CLI to
+# drive, and the tunnel's egress IP is fixed for the tunnel's life — so this
+# section is the netns analogue of the host-CLI wrapper above:
+#
+#   netns_exists      is the namespace bound (live)?
+#   tunnel_egress_ip  the egress IPv4 of the CALLING process (a plain curl;
+#                     for a process inside the namespace that IS the tunnel IP)
+#   netns_egress_ok   does `ip netns exec <ns> curl` get an answer (tunnel live)?
+#   rebuild_tunnel    best-effort `systemctl restart <unit>` (fresh session +
+#                     fresh exit IP; the up script proves egress before it
+#                     exits 0, and a Type=oneshot restart is synchronous)
+#   tunnel_rotate     rebuild_tunnel() then tunnel_egress_ip() — the netns
+#                     analogue of the host CLI rotate()
+#
+# All of them treat a missing tool (no ip/curl/systemctl) or a timeout as a
+# clean failure (False/None) that the caller logs, never an exception — the
+# orchestrator decides what "best effort" means. No credential handling here:
+# the session is pre-negotiated by the tunnel unit as the operator's user.
+# NOTE (recorded): a process already inside the namespace keeps its (old)
+# namespace until it is restarted — a rebuild re-creates the namespace for
+# NEWLY-launched consumers, so tunnel_rotate() is a best-effort IP refresh.
+
+# Seconds for the egress curls (the endpoint is a tiny response; the ceiling is
+# mostly the tunnel's worst-case first-packet latency).
+_TUNNEL_TIMEOUT_SEC = 15.0
+
+
+def _run_cmd(args: list[str], *, timeout: float = 30.0) -> tuple[int, str]:
+    """Run an external tool, returning ``(rc, combined_output)`` — never raises.
+
+    Unlike :func:`_run` (the nordvpn-CLI wrapper that raises
+    :class:`NordvpnError`), the tunnel helpers treat a missing tool or a
+    timeout as a clean, loggable failure: rc 127 (command not found) or 124
+    (timed out), with a short note in the output. Overridable in tests.
+    """
+    try:
+        proc = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
+    except FileNotFoundError:
+        return 127, f"command not found: {args[0]!r}"
+    except subprocess.TimeoutExpired:
+        return 124, f"timed out after {timeout:.0f}s: {' '.join(args)}"
+    out = (proc.stdout or "") + ("\n" if proc.stdout and proc.stderr else "") + (proc.stderr or "")
+    return proc.returncode, out
+
+
+def netns_exists(ns: str | None = None) -> bool:
+    """True when the namespace is bound (i.e. the tunnel unit is active).
+
+    Primary check: systemd holds the namespace by a symlink under
+    ``/var/run/netns`` (no privileges needed). Fallback: ``ip netns list``
+    (needs iproute2; a missing ``ip`` is a clean ``False``).
+    """
+    name = ns or WISHLIST_VPN_NS
+    try:
+        if Path("/var/run/netns", name).exists():
+            return True
+    except OSError:
+        pass
+    rc, out = _run_cmd(["ip", "netns", "list"], timeout=10.0)
+    if rc != 0:
+        return False
+    # Lines look like "wlvpn: /var/run/netns/wlvpn".
+    return any(line.split(":")[0].strip() == name for line in out.splitlines() if line.strip())
+
+
+def tunnel_egress_ip(timeout: float | None = None) -> str | None:
+    """The egress IPv4 of the CALLING process, or ``None`` when unreadable.
+
+    A plain (un-namespaced) curl to ``WISHLIST_VPN_ENDPOINT``: for a process
+    placed inside the tunnel namespace that is the tunnel's exit IP; on the
+    plain host it is the host's own IP. Best-effort by design — any failure
+    (no curl, timeout, no IP in the body) is ``None``, never an exception.
+    """
+    t = float(timeout) if timeout else _TUNNEL_TIMEOUT_SEC
+    # Give the subprocess a little more slack than curl's own --max-time so
+    # curl aborts first and we see a normal non-zero rc rather than a TimeoutExpired.
+    rc, out = _run_cmd(
+        ["curl", "-s", "--max-time", str(int(t)), WISHLIST_VPN_ENDPOINT], timeout=t + 5.0
+    )
+    if rc != 0:
+        log.debug("tunnel_egress_ip: curl failed (rc=%s): %s", rc, out.strip()[:200])
+        return None
+    m = _IP_RE.search(out)
+    return m.group(0) if m else None
+
+
+def netns_egress_ok(ns: str | None = None, timeout: float | None = None) -> bool:
+    """True when ``ip netns exec <ns> curl <endpoint>" gets a real answer.
+
+    Requires root (``ip netns exec`` needs CAP_NET_ADMIN) or a scoped sudoers
+    rule; a missing ``ip`` is a clean ``False``. rc 0 AND a non-empty body —
+    the same bar scripts/vpn_netns_up.sh uses to prove egress.
+    """
+    name = ns or WISHLIST_VPN_NS
+    t = float(timeout) if timeout else _TUNNEL_TIMEOUT_SEC
+    rc, out = _run_cmd(
+        ["ip", "netns", "exec", name, "curl", "-s", "--max-time", str(int(t)), WISHLIST_VPN_ENDPOINT],
+        timeout=t + 10.0,
+    )
+    if not (rc == 0 and out.strip()):
+        log.debug("netns_egress_ok: ns %s not live (rc=%s): %s", name, rc, out.strip()[:200])
+        return False
+    return True
+
+
+def rebuild_tunnel(unit: str | None = None, timeout: float = 180.0) -> bool:
+    """Best-effort ``systemctl restart <unit>`` — True when the tunnel (re)came up.
+
+    The tunnel unit is Type=oneshot (RemainAfterExit), so a successful restart
+    returns only after ExecStart (vpn_netns_up.sh) has finished — which itself
+    verifies egress before exiting 0. Needs root; a non-root/failed restart is
+    a clean ``False`` for the caller to log, never an exception.
+    """
+    name = unit or WISHLIST_VPN_UNIT
+    rc, out = _run_cmd(["systemctl", "restart", name], timeout=timeout)
+    if rc != 0:
+        log.warning("rebuild_tunnel: systemctl restart %s failed (rc=%s): %s", name, rc, out.strip()[:200])
+        return False
+    return True
+
+
+def tunnel_rotate(ns: str | None = None, unit: str | None = None) -> str | None:
+    """Refresh the tunnel's exit IP: rebuild the tunnel, return the egress IP.
+
+    The netns analogue of the host-CLI :func:`rotate`: a rebuilt tunnel
+    negotiates a fresh WireGuard session (fresh assigned address / exit IP).
+    Returns ``None`` when the rebuild fails or the egress IP is unreadable —
+    the caller (scripts/verify_deals.py) treats that as "continue on the
+    current IP" rather than an error. See the section note above about
+    processes already inside the namespace keeping their old one.
+    """
+    if not rebuild_tunnel(unit):
+        return None
+    new_ip = tunnel_egress_ip()
+    if not new_ip:
+        log.warning("tunnel_rotate: rebuild ok but no egress IP was readable")
+        return None
+    log.info("tunnel rebuilt; egress IP now %s", new_ip)
     return new_ip
 
 
