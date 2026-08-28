@@ -125,6 +125,7 @@ def _is_antibot_stub(body: str) -> bool:
         "to discuss automated access",
         "/errors/validateCaptcha",
         "captcha",
+        "robot check",  # Amazon's "Robot Check" page <title> (distinct block shape)
     )
     body_lc = body.lower()
     return any(n in body_lc for n in needles)

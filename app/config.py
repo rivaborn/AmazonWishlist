@@ -248,3 +248,9 @@ BOOKBUB_BACKFILL_PROGRESS = Path(
 LLM_BASE_URL = os.environ.get("LLM_BASE_URL", "http://192.168.1.40:11430/v1")
 LLM_MODEL = os.environ.get("LLM_MODEL", "").strip()
 LLM_TIMEOUT = float(os.environ.get("LLM_TIMEOUT", "120"))
+
+# ---------- Amazon price reader (app/amazon_price.py) ----------
+# How many chars of a product page's innerText to hand to the LLM price
+# fallback, and the navigation timeout (ms) before giving up on one book.
+AMAZON_LLM_TEXT_CAP = int(os.environ.get("AMAZON_LLM_TEXT_CAP", "6000"))
+AMAZON_NAV_TIMEOUT_MS = int(os.environ.get("AMAZON_NAV_TIMEOUT_MS", "45000"))
