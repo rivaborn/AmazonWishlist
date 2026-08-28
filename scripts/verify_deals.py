@@ -8,7 +8,11 @@ Amazon ASIN) this orchestrator:
    ``NORDVPN_START_COUNTRY``) — or, in ``--netns`` tunnel mode (the Ubuntu
    deployment: this process runs INSIDE a network namespace whose only route
    is the NordLynx/WireGuard tunnel), that the namespace has live egress,
-   rebuilding it once via the tunnel unit when it is missing/dead,
+   rebuilding it once via the tunnel unit when it is missing/dead. Tunnel
+   mode is FAIL-CLOSED: the namespace's only route is the tunnel (it can
+   never fall back to the host's plain IP), egress is re-verified before
+   EVERY Amazon read, and the run ABORTS the moment the tunnel loses live
+   egress — Amazon is never fetched unless the tunnel is verifiably up,
 2. opens the book's ``amazon.com/dp/<ASIN>`` page in a Playwright context
    built from a rotated browser fingerprint (``app.fingerprint``),
 3. reads the current price (``app.amazon_price``), classifies the deal
@@ -163,6 +167,24 @@ def _ensure_tunnel(ns: str) -> tuple[bool, str | None]:
     return False, None
 
 
+def _tunnel_live(ns: str) -> bool:
+    """Tunnel mode, FAIL-CLOSED gate: is the namespace egressing through Nord *right now*?
+
+    A single cheap curl through the tunnel (``netns_egress_ok``). This is the
+    per-book safety check: the verifier never fetches an Amazon page unless the
+    tunnel is verifiably live at that moment. The namespace is also leak-proof
+    by construction (its only route is the WireGuard tunnel), so a dead tunnel
+    can never leak Amazon traffic onto the host's plain IP — but we still stop
+    rather than burn the run on un-deliverable reads. A transient blip (one
+    failed check) is retried once before we give up, so a momentary jitter does
+    not abort a multi-hour run.
+    """
+    if nordvpn.netns_egress_ok(ns):
+        return True
+    time.sleep(5.0)  # a transient blip may clear itself
+    return nordvpn.netns_egress_ok(ns)
+
+
 def _resolve_scope(conn, db_path: Path, args) -> list[dict]:
     """Pick this run's work set (the "scope"), for resumability.
 
@@ -263,6 +285,18 @@ def _run(args) -> int:
             processed = 0
             last_fp: fp.Fingerprint | None = None
             for deal in pending:
+                # Tunnel mode FAIL-CLOSED gate: never read an Amazon page unless
+                # the tunnel is verifiably live right now. If it is gone,
+                # abort the whole run before touching Amazon — a dead/stale
+                # tunnel must never be the reason a page is fetched. Rows
+                # already verified are committed and resume via deal_status.
+                if args.netns and not _tunnel_live(args.netns):
+                    print(f"tunnel error: namespace {args.netns!r} lost live egress after "
+                          f"{processed} verified book(s). Stopping before any further Amazon "
+                          f"access outside the tunnel — fix it (systemctl restart "
+                          f"{WISHLIST_VPN_UNIT}) and re-run; verified rows are kept.")
+                    return 1
+
                 if last_fp is None:
                     f = fp.next_fingerprint()
                 else:
