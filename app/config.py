@@ -274,3 +274,23 @@ NORDVPN_COUNTRIES = [
 NORDVPN_CITIES = [
     c.strip() for c in os.environ.get("NORDVPN_CITIES", "").split(",") if c.strip()
 ]
+# Starting exit country for scripts/verify_deals.py (first of the pool by default).
+NORDVPN_START_COUNTRY = os.environ.get(
+    "NORDVPN_START_COUNTRY", NORDVPN_COUNTRIES[0] if NORDVPN_COUNTRIES else "United States"
+)
+# Books per exit IP / fingerprint pair before a NordVPN rotation (the
+# scripts/verify_deals.py --rotate-every default).
+NORDVPN_ROTATE_EVERY = int(os.environ.get("NORDVPN_ROTATE_EVERY", "10"))
+
+# ---------- Live-deal verification pacing (scripts/verify_deals.py) ----------
+# Random jitter (seconds) between per-book Amazon reads (anti-bot pacing, the
+# same idea as the wishlist scraper's REQUEST_DELAY_MIN/MAX), the per-book retry
+# budget for transient failures (block page / navigation failure / no price),
+# and the backoff sleep between retries.
+VERIFY_DELAY_MIN = float(os.environ.get("VERIFY_DELAY_MIN", "2"))
+VERIFY_DELAY_MAX = float(os.environ.get("VERIFY_DELAY_MAX", "6"))
+VERIFY_MAX_RETRIES = int(os.environ.get("VERIFY_MAX_RETRIES", "2"))
+VERIFY_RETRY_BACKOFF = float(os.environ.get("VERIFY_RETRY_BACKOFF", "20"))
+# Advisory progress mirror (atomic tmp+replace telemetry). The source of truth
+# for "what is pending" is deal_status in DEALS_DB, never this file.
+VERIFY_PROGRESS = Path(os.environ.get("VERIFY_PROGRESS", DATA_DIR / "verify_progress.json"))
