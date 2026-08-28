@@ -97,20 +97,25 @@ run nv connect
 # ---- harvest the WireGuard session, then restore host routing ----------------
 if [ "$DRY_RUN" = 1 ]; then
   log "harvest (after waiting up to 20 s for the 'nordlynx' iface):"
-  echo "  [dry-run] wg show nordlynx private-key                              # PRIV (session private key)"
-  echo "  [dry-run] wg show nordlynx dump | awk '\$1==\"peer\"{print \$2; exit}'         # PEER (peer public key)"
-  echo "  [dry-run] wg show nordlynx dump | awk '\$1==\"endpoint\"{print \$2; exit}'  # ENDPOINT (server ip:port)"
-  echo "  [dry-run] ip -4 addr show nordlynx | awk '/inet /{print \$2; exit}'  # ADDR (assigned, e.g. 10.5.0.2/32)"
+  echo "  [dry-run] wg show nordlynx private-key                                # PRIV (session private key)"
+  echo "  [dry-run] wg show nordlynx dump | awk '\$4==\"0.0.0.0/0\"{print \$1; exit}'        # PEER (peer public key)"
+  echo "  [dry-run] wg show nordlynx dump | awk '\$4==\"0.0.0.0/0\"{print \$3; exit}'   # ENDPOINT (server ip:port; '(none)' -> empty)"
+  echo "  [dry-run] ip -4 addr show nordlynx | awk '/inet /{print \$2; exit}'    # ADDR (assigned, e.g. 10.5.0.2/16)"
   echo "  [dry-run] nv disconnect                         # host routing back to normal"
   echo "  [dry-run] (abort if any of PRIV/PEER/ENDPOINT/ADDR is empty)"
 else
   for _ in $(seq 1 20); do wg show nordlynx >/dev/null 2>&1 && break; sleep 1; done
   PRIV=$(wg show nordlynx private-key 2>/dev/null || true)
-  # `wg show <iface> dump` is indented multi-line ("nordlynx:" / "\tpeer <key>" /
-  # "\t\tendpoint <ip:port>" ...), so parse by the KEY on each line rather than by
-  # fixed line/field numbers — indentation and the header line vary by version.
-  PEER=$(wg show nordlynx dump | awk '$1=="peer"{print $2; exit}')
-  ENDPOINT=$(wg show nordlynx dump | awk '$1=="endpoint"{print $2; exit}')
+  # `wg show nordlynx dump` is TAB-separated (no header words): line 1 is the
+  # interface (private-key, public-key, listening-port, fwmark), the following
+  # lines are peers (peer-public-key, preshared-key, endpoint, allowed-ips,
+  # latest-handshake, rx, tx, persistent-keepalive). Nord has exactly one peer
+  # with allowed-ips 0.0.0.0/0, so key off that: peer public key is field 1 and
+  # the endpoint is field 3 of the matching line; a "(none)" preshared key is
+  # normal.
+  PEER=$(wg show nordlynx dump | awk '$4=="0.0.0.0/0"{print $1; exit}')
+  ENDPOINT=$(wg show nordlynx dump | awk '$4=="0.0.0.0/0"{print $3; exit}')
+  [ "$ENDPOINT" = "(none)" ] && ENDPOINT=""
   ADDR=$(ip -4 addr show nordlynx | awk '/inet /{print $2; exit}')
   nv disconnect >/dev/null
   sleep 1
