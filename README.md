@@ -54,11 +54,11 @@ The script is **idempotent** — re-run it after every code change and it will r
 What it does on first run:
 
 - Creates a `wishlist` system user.
-- `apt-get install`s the Login-tab infra (`xvfb`, `x11vnc`, `websockify`, `novnc`).
+- `apt-get install`s the Login-tab infra (`xvfb`, `x11vnc`, `websockify`, `novnc`) plus the tunnel's hard deps (`curl`, `wireguard-tools`), and — best-effort, a stale .deb URL must never abort a deploy — the `nordvpn` CLI (it ships as a .deb from Nord, not a distro package).
 - Copies the repo to `/opt/amazon-wishlist`.
 - Builds a venv (with an `ensurepip` fallback for Ubuntu builds where `python3 -m venv` skips pip).
 - Installs Python deps and runs `playwright install --with-deps chromium` to pull the browser binary + its system runtime libraries.
-- Installs and starts the `amazon-wishlist.service` systemd unit.
+- Installs and starts the `amazon-wishlist.service` systemd unit, and installs + enables `amazon-wishlist-vpn.service` (the `wlvpn` NordVPN tunnel — best-effort *start*: it only comes up after the operator has run `nordvpn login --token <TOKEN>`, which must never block a deploy).
 
 ### Standard deploy loop (after a code change)
 
@@ -472,19 +472,30 @@ A BookBub deal is only as good as the price Amazon actually charges today. `scri
 
 ```bash
 python scripts/verify_deals.py [--limit N] [--rotate-every N] [--db PATH] [--check] [--nord-user U --nord-pass P] [--fresh]
+python scripts/verify_deals.py --netns wlvpn …   # Ubuntu: run INSIDE the wlvpn tunnel (see below)
 ```
 
 - **Per-book price check**: each pending deal (`deal_status IS NULL` with an Amazon ASIN) is opened at `amazon.com/dp/<ASIN>` via `app/amazon_price.py` and compared to the stored `deal_price`: the current price at or below the deal price → **`current`**, above it → **`expired`**, and a price that cannot be read (blocked page, no price) → **`unknown`** — never guessed. When `LLM_MODEL` is set, an unreadable page falls back to the optional local LLM asking for just the current price (off by default; an LLM failure only logs a warning and leaves the price unreadable, so the row lands `unknown`).
 - **Outcome columns**: `mark_verified` writes `deal_status`, the read `current_price` (NULL when `unknown`), and `verified_at` onto the `deal` row. **`deal_status` is the resume cursor** — a pending deal is exactly `deal_status IS NULL`, so an interrupted run resumes by simply re-running (verified rows are skipped, and a re-run of a finished run is a fast no-op); `data/verify_progress.json` (atomic tmp+replace) is an advisory telemetry mirror, never the source of truth. `--fresh` starts a new run scope; `--db` targets another DB (default `DEALS_DB`); `--check` is a dry run that prints the pending count + effective config, connects to nothing, and exits 0.
-- **NordVPN exit-IP rotation**: every `--rotate-every` books — the default is **10 books per IP** (`NORDVPN_ROTATE_EVERY`) — the run hops to a different NordVPN server via `app/nordvpn.py`: `rotate()` = disconnect → connect to a country/city *different* from the current one (pooled in `NORDVPN_COUNTRIES`) → read the new exit IP.
+- **NordVPN exit-IP rotation**: every `--rotate-every` books — the default is **10 books per IP** (`NORDVPN_ROTATE_EVERY`) — the run hops to a different NordVPN server via `app/nordvpn.py`: `rotate()` = disconnect → connect to a country/city *different* from the current one (pooled in `NORDVPN_COUNTRIES`) → read the new exit IP. In `--netns` tunnel mode (the Ubuntu deployment, below) the hop is instead a *best-effort tunnel rebuild* for a fresh exit IP — the namespace's IP is fixed for the tunnel's life, and a rebuild that is not permitted leaves the stable IP while the run continues.
 - **Fingerprint rotation**: each book is fetched in its own browser context with a rotated fingerprint (`app/fingerprint.py`) — one of four plain desktop-Chrome 149 User-Agents with distinct OS tokens (`_LINUX` `X11; Linux x86_64`, `_WIN` `Windows NT 10.0; Win64; x64`, `_MAC` `Macintosh; Intel Mac OS X 10_15_7`, `_CROS` `X11; CrOS x86_64`), one of six `en-*` locales, and one of five viewports. After every exit-IP rotation the next fingerprint is *fresh* — different in **all three** fields from the previous one — so the IP and the browser identity change together.
 - **Anti-bot pacing and retries**: per-book reads are spaced by a random jitter (`VERIFY_DELAY_MIN`–`VERIFY_DELAY_MAX` seconds, the same idea as the wishlist scraper's pacing); a blocked page, failed navigation, or no-price result is retried with backoff (`VERIFY_RETRY_BACKOFF` × up to `VERIFY_MAX_RETRIES`) before the book is recorded `unknown`. Blocked/ambiguous pages are dumped to `data/diagnostics/` for selector debugging.
 
-The NordVPN account is read **only** from the `NORDVPN_USERNAME` / `NORDVPN_PASSWORD` environment variables (or `--nord-user` / `--nord-pass`) — never from a committed file. The starting exit country defaults to the first entry of `NORDVPN_COUNTRIES` (`NORDVPN_START_COUNTRY`); the CLI itself is `nordvpn` on `PATH` (overridable via `NORDVPN_CLI`), and `python -m app.nordvpn` is a standalone probe (`--login` / `--rotate` / `--connect COUNTRY [CITY]`).
+The NordVPN account is read **only** from the `NORDVPN_USERNAME` / `NORDVPN_PASSWORD` environment variables (or `--nord-user` / `--nord-pass`) — never from a committed file. The starting exit country defaults to the first entry of `NORDVPN_COUNTRIES` (`NORDVPN_START_COUNTRY`); the CLI itself is `nordvpn` on `PATH` (overridable via `NORDVPN_CLI`), and `python -m app.nordvpn` is a standalone probe (`--login` / `--rotate` / `--connect COUNTRY [CITY]`). That host-CLI path is for dev boxes; the Ubuntu deployment uses the netns tunnel below instead.
+
+### The wlvpn NordVPN tunnel (Ubuntu deployment)
+
+On the Ubuntu box the verifier does **not** use the host-wide `nordvpn connect`: the NordVPN CLI has no per-process split tunnel (a `connect` reroutes the whole host). So `scripts/vpn_netns_up.sh` *borrows* the session into a Linux network namespace instead: a brief `nordvpn connect` on the host negotiates a WireGuard (NordLynx) session; the script reads the session's keys/endpoint/assigned address back out of the `nordlynx` interface (`wg show`) and `nordvpn disconnect`s (host routing returns to normal); it then rebuilds an equivalent WireGuard interface inside the `wlvpn` netns with `allowed-ips 0.0.0.0/0` plus a single default route. The namespace is leak-proof (there is no other route to fall back on), and **only processes placed inside it egress through Nord** — the host's SSH, LAN/NFS, and the wishlist scraper itself keep their normal connection.
+
+- **`amazon-wishlist-vpn.service`** (Type=oneshot + `RemainAfterExit`) brings the namespace up at boot and keeps it alive as a dependency target; it is `Requires`/`After` `nordvpnd.service` with a boot-race-resilient restart **at the source** (`Restart=on-failure`, `RestartSec=20`, `StartLimitBurst=5` — a `Requires`/`BindsTo` consumer that loses this race fails its start job with result “dependency” and can never retry itself). `ExecStop` runs `scripts/vpn_netns_down.sh`. `install_systemd.sh` installs, enables, and best-effort starts it. Both scripts support `--dry-run` / `WISHLIST_VPN_DRY_RUN=1` to print the exact command sequence without executing anything.
+- **Prerequisites**: the `nordvpn` CLI installed and **logged in once** as the operator user (`nordvpn login --token <TOKEN>` — the token/credentials live only in the operator's login, never in this repo; the tunnel merely reads the session back out of the interface), that user in the `nordvpn` group, and `wireguard-tools` (all handled by `install_systemd.sh`, the CLI in a best-effort block).
+- **Allowlist warning**: during that brief host connect the script allowlists the host's LAN (`WISHLIST_VPN_LAN_SUBNET`), the Tailscale range `100.64.0.0/10`, and port 22 so SSH/mgmt are never dropped — **set `WISHLIST_VPN_LAN_SUBNET` to match the host's LAN** or the SSH session drops for those seconds.
+- **Running the verifier inside the tunnel**: `amazon-wishlist-verify.service` (`systemctl start amazon-wishlist-verify`, follow with `journalctl -u amazon-wishlist-verify -f`) or the ad-hoc `scripts/vpn_verify.sh` (needs the scoped sudoers rule documented in its header; the unit needs none). Both place the process in the namespace (`NetworkNamespacePath` / `ip netns exec`) with the namespace's Nord DNS bound over `/etc/resolv.conf`, and both run `scripts/verify_deals.py --netns wlvpn`. In this mode no `NORDVPN_USERNAME` / `NORDVPN_PASSWORD` is needed anywhere.
+- **Steady state**: the tunnel's egress IP is **fixed for the tunnel's life** and changes only on a rebuild, so the per-N `--rotate-every` hop is a *best-effort* `systemctl restart` of the tunnel unit (fresh exit IP when permitted; a rebuild that is not permitted leaves the stable IP and the run continues with fingerprint-only rotation). A NordLynx peer-key rotation can silently stale the tunnel the same way — `systemctl restart amazon-wishlist-vpn` re-establishes it, and the verifier's `unknown`/failure rate is the canary.
 
 ### Configuration (env vars)
 
-The session link is never committed (it is a rotating signed token), and neither are the NordVPN credentials. The `BOOKBUB_*` / `LLM_*` / `NORDVPN_*` / `VERIFY_*` settings in `app/config.py`:
+The session link is never committed (it is a rotating signed token), and neither are the NordVPN credentials. The `BOOKBUB_*` / `LLM_*` / `NORDVPN_*` / `VERIFY_*` / `WISHLIST_VPN_*` settings in `app/config.py` (the `WISHLIST_VPN_USER` / `WISHLIST_VPN_LAN_SUBNET` / `WISHLIST_VPN_DNS` tunnel knobs are read by the tunnel scripts from `/etc/default/amazon-wishlist`):
 
 | var | default | meaning |
 | --- | --- | --- |
@@ -510,6 +521,12 @@ The session link is never committed (it is a rotating signed token), and neither
 | `VERIFY_DELAY_MIN` / `VERIFY_DELAY_MAX` | `2` / `6` | Jitter range (seconds) between per-book Amazon reads (anti-bot pacing). |
 | `VERIFY_MAX_RETRIES` / `VERIFY_RETRY_BACKOFF` | `2` / `20` | Per-book retry budget for transient failures (block page / navigation failure / no price) and the backoff sleep between retries. |
 | `VERIFY_PROGRESS` | `data/verify_progress.json` | Advisory progress mirror for the verifier (atomic writes; gitignored via `data/`). The resume cursor is `deal_status` in `DEALS_DB`, not this file. |
+| `WISHLIST_VPN_USER` | *(unset)* | The operator user the tunnel scripts drive the `nordvpn` CLI as (in `/etc/default/amazon-wishlist`; that user must have run `nordvpn login --token <TOKEN>`). No default on purpose — the CLI cannot run as root. |
+| `WISHLIST_VPN_LAN_SUBNET` | `192.168.1.0/24` | The host's LAN, kept off the tunnel during the brief host connect so SSH/NFS are not dropped. **Must match the host.** |
+| `WISHLIST_VPN_NS` / `WISHLIST_VPN_IFACE` | `wlvpn` / `wlwg` | Network-namespace / WireGuard interface names. The tunnel unit, the verifier unit, and `--netns` must all agree. |
+| `WISHLIST_VPN_DNS` | `103.86.96.100,1.1.1.1` | Per-namespace resolvers written to `/etc/netns/<NS>/resolv.conf` (Nord resolver + fallback), reached via the tunnel. |
+| `WISHLIST_VPN_UNIT` | `amazon-wishlist-vpn.service` | The tunnel unit the verifier rebuilds on a per-N rotate (`systemctl restart`; needs root or a scoped sudoers rule). |
+| `WISHLIST_VPN_ENDPOINT` | `https://api.ipify.org` | Endpoint the egress checks curl (must be reachable through the tunnel's DNS). |
 
 The local LLM gateway is an **optional normalisation step, off by default**: `--llm-model`/`LLM_MODEL` reformat the parsed list via `POST {LLM_BASE_URL}/chat/completions`. It never blocks the write — on any failure the raw parsed list is written instead.
 
