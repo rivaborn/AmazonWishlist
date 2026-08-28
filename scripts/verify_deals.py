@@ -156,33 +156,37 @@ def _ensure_tunnel(ns: str) -> tuple[bool, str | None]:
     amazon-wishlist-vpn.service as the operator user, so no credentials are
     needed here.
     """
-    if nordvpn.netns_egress_ok(ns):
-        return True, nordvpn.tunnel_egress_ip()
+    ip = nordvpn.tunnel_egress_ip()
+    if ip:
+        return True, ip
     why = "missing" if not nordvpn.netns_exists(ns) else "present but not egressing"
     log.warning("netns %r is %s; attempting a one-time tunnel rebuild...", ns, why)
     if not nordvpn.rebuild_tunnel():
-        log.warning("tunnel rebuild not permitted/failed (root?); re-checking egress anyway")
-    if nordvpn.netns_egress_ok(ns):
-        return True, nordvpn.tunnel_egress_ip()
+        log.warning("tunnel rebuild not permitted/failed (needs root); re-checking egress anyway")
+    ip2 = nordvpn.tunnel_egress_ip()
+    if ip2:
+        return True, ip2
     return False, None
 
 
 def _tunnel_live(ns: str) -> bool:
     """Tunnel mode, FAIL-CLOSED gate: is the namespace egressing through Nord *right now*?
 
-    A single cheap curl through the tunnel (``netns_egress_ok``). This is the
-    per-book safety check: the verifier never fetches an Amazon page unless the
-    tunnel is verifiably live at that moment. The namespace is also leak-proof
-    by construction (its only route is the WireGuard tunnel), so a dead tunnel
-    can never leak Amazon traffic onto the host's plain IP — but we still stop
-    rather than burn the run on un-deliverable reads. A transient blip (one
-    failed check) is retried once before we give up, so a momentary jitter does
-    not abort a multi-hour run.
+    Liveness is a PLAIN curl (``tunnel_egress_ip``), NOT ``ip netns exec``: this
+    process runs INSIDE the namespace as a non-root user whose only route is the
+    tunnel, so a plain curl either returns the tunnel's egress IP (live) or
+    fails (dead) — and the leak-proof namespace means it can never fall back to
+    the host's IP. ``ip netns exec`` would additionally need root, which the
+    verifier does not have. A dead/stale tunnel therefore never causes Amazon
+    traffic to egress from the host's plain IP.
+
+    A transient blip (one failed check) is retried once before we give up, so a
+    momentary jitter does not abort a multi-hour run.
     """
-    if nordvpn.netns_egress_ok(ns):
+    if nordvpn.tunnel_egress_ip():
         return True
     time.sleep(5.0)  # a transient blip may clear itself
-    return nordvpn.netns_egress_ok(ns)
+    return nordvpn.tunnel_egress_ip() is not None
 
 
 def _resolve_scope(conn, db_path: Path, args) -> list[dict]:
