@@ -428,6 +428,9 @@ The `deal` table has one row per BookBub deal per day:
 | `no_amazon_link` | `1` when `amazon_url` is NULL (no Amazon link saved), else `0`. |
 | `owned_in_grimmory` | `1` owned / `0` not owned / **NULL when `grimmory.db` is unavailable**. An approximate normalised title+author match against `data/grimmory.db` — kept in the DB so a human can audit its accuracy. |
 | `audited_at` | ISO timestamp of when the row was last written. |
+| `deal_status` | live-deal check outcome: `current` / `expired` / `unknown` — **NULL until first verified** (written by `scripts/verify_deals.py`; the resume cursor). |
+| `current_price` | the Amazon price last read during verification (NULL when the read was unreadable → `unknown`). |
+| `verified_at` | ISO timestamp of the last live check. |
 
 Rows are keyed by a UNIQUE index on `(date, bookbub_url)`. Re-running the same date **upserts** that day's rows (refreshed, never duplicated); rows for other dates are never deleted, so the history is kept for audit. The ownership lookup reads `grimmory.db` read-only and is approximate on purpose (normalised title **and** author must both match).
 
@@ -463,9 +466,25 @@ python scripts/dedup_deals.py [--db PATH] [--backup PATH] [--check]
 - **Automatic backup**: before removing anything, the DB is backed up with the WAL-safe sqlite backup API to `data/deals_pre_dedup_<YYYYMMDD-HHMMSS>.db` (gitignored via `data/`, path overridable with `--backup`) — the pre-dedup state can always be restored from it.
 - `--db` targets another deals DB (default `DEALS_DB` = `data/deals.db`).
 
+### Verifying deals are still live
+
+A BookBub deal is only as good as the price Amazon actually charges today. `scripts/verify_deals.py` walks the stored deals, re-reads each book's live Amazon price over a rotating NordVPN tunnel, and records the outcome back in the deals DB:
+
+```bash
+python scripts/verify_deals.py [--limit N] [--rotate-every N] [--db PATH] [--check] [--nord-user U --nord-pass P] [--fresh]
+```
+
+- **Per-book price check**: each pending deal (`deal_status IS NULL` with an Amazon ASIN) is opened at `amazon.com/dp/<ASIN>` via `app/amazon_price.py` and compared to the stored `deal_price`: the current price at or below the deal price → **`current`**, above it → **`expired`**, and a price that cannot be read (blocked page, no price) → **`unknown`** — never guessed. When `LLM_MODEL` is set, an unreadable page falls back to the optional local LLM asking for just the current price (off by default; an LLM failure only logs a warning and leaves the price unreadable, so the row lands `unknown`).
+- **Outcome columns**: `mark_verified` writes `deal_status`, the read `current_price` (NULL when `unknown`), and `verified_at` onto the `deal` row. **`deal_status` is the resume cursor** — a pending deal is exactly `deal_status IS NULL`, so an interrupted run resumes by simply re-running (verified rows are skipped, and a re-run of a finished run is a fast no-op); `data/verify_progress.json` (atomic tmp+replace) is an advisory telemetry mirror, never the source of truth. `--fresh` starts a new run scope; `--db` targets another DB (default `DEALS_DB`); `--check` is a dry run that prints the pending count + effective config, connects to nothing, and exits 0.
+- **NordVPN exit-IP rotation**: every `--rotate-every` books — the default is **10 books per IP** (`NORDVPN_ROTATE_EVERY`) — the run hops to a different NordVPN server via `app/nordvpn.py`: `rotate()` = disconnect → connect to a country/city *different* from the current one (pooled in `NORDVPN_COUNTRIES`) → read the new exit IP.
+- **Fingerprint rotation**: each book is fetched in its own browser context with a rotated fingerprint (`app/fingerprint.py`) — one of four plain desktop-Chrome 149 User-Agents with distinct OS tokens (`_LINUX` `X11; Linux x86_64`, `_WIN` `Windows NT 10.0; Win64; x64`, `_MAC` `Macintosh; Intel Mac OS X 10_15_7`, `_CROS` `X11; CrOS x86_64`), one of six `en-*` locales, and one of five viewports. After every exit-IP rotation the next fingerprint is *fresh* — different in **all three** fields from the previous one — so the IP and the browser identity change together.
+- **Anti-bot pacing and retries**: per-book reads are spaced by a random jitter (`VERIFY_DELAY_MIN`–`VERIFY_DELAY_MAX` seconds, the same idea as the wishlist scraper's pacing); a blocked page, failed navigation, or no-price result is retried with backoff (`VERIFY_RETRY_BACKOFF` × up to `VERIFY_MAX_RETRIES`) before the book is recorded `unknown`. Blocked/ambiguous pages are dumped to `data/diagnostics/` for selector debugging.
+
+The NordVPN account is read **only** from the `NORDVPN_USERNAME` / `NORDVPN_PASSWORD` environment variables (or `--nord-user` / `--nord-pass`) — never from a committed file. The starting exit country defaults to the first entry of `NORDVPN_COUNTRIES` (`NORDVPN_START_COUNTRY`); the CLI itself is `nordvpn` on `PATH` (overridable via `NORDVPN_CLI`), and `python -m app.nordvpn` is a standalone probe (`--login` / `--rotate` / `--connect COUNTRY [CITY]`).
+
 ### Configuration (env vars)
 
-The session link is never committed (it is a rotating signed token). The `BOOKBUB_*` / `LLM_*` settings in `app/config.py`:
+The session link is never committed (it is a rotating signed token), and neither are the NordVPN credentials. The `BOOKBUB_*` / `LLM_*` / `NORDVPN_*` / `VERIFY_*` settings in `app/config.py`:
 
 | var | default | meaning |
 | --- | --- | --- |
@@ -483,6 +502,14 @@ The session link is never committed (it is a rotating signed token). The `BOOKBU
 | `LLM_BASE_URL` | `http://192.168.1.40:11430/v1` | Local LLMConfig gateway (OpenAI-compatible) used for optional normalisation. |
 | `LLM_MODEL` | *(unset = off)* | Model for `--llm-model`. The deterministic parse is the deliverable — an unavailable model/gateway only logs a warning and writes the parsed list as-is. |
 | `LLM_TIMEOUT` | `120` | Timeout (seconds) for the LLM call. |
+| `NORDVPN_USERNAME` / `NORDVPN_PASSWORD` | *(unset)* | The NordVPN account for the live-deal verifier. **Env-only** (or `--nord-user` / `--nord-pass`) — never committed, never given a default. |
+| `NORDVPN_CLI` | `nordvpn` | Path to the NordVPN CLI (override if it is not on `PATH`). |
+| `NORDVPN_START_COUNTRY` | first of `NORDVPN_COUNTRIES` | Starting exit country for `verify_deals.py` (`nordvpn connect`). |
+| `NORDVPN_COUNTRIES` | `United States,Germany,Japan,United Kingdom,Canada,Australia` | Exit-country pool the verifier rotates through (`nordvpn rotate`), comma-separated. |
+| `NORDVPN_ROTATE_EVERY` | `10` | Books per exit IP / fingerprint pair before a rotation (the `--rotate-every` default) — the 10-per-IP budget. |
+| `VERIFY_DELAY_MIN` / `VERIFY_DELAY_MAX` | `2` / `6` | Jitter range (seconds) between per-book Amazon reads (anti-bot pacing). |
+| `VERIFY_MAX_RETRIES` / `VERIFY_RETRY_BACKOFF` | `2` / `20` | Per-book retry budget for transient failures (block page / navigation failure / no price) and the backoff sleep between retries. |
+| `VERIFY_PROGRESS` | `data/verify_progress.json` | Advisory progress mirror for the verifier (atomic writes; gitignored via `data/`). The resume cursor is `deal_status` in `DEALS_DB`, not this file. |
 
 The local LLM gateway is an **optional normalisation step, off by default**: `--llm-model`/`LLM_MODEL` reformat the parsed list via `POST {LLM_BASE_URL}/chat/completions`. It never blocks the write — on any failure the raw parsed list is written instead.
 
