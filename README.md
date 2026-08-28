@@ -449,6 +449,20 @@ It is **idempotent and resumable**: after every date a per-date status (`ok` / `
 
 **Cloudflare monitoring**: a day whose page is still on the interstitial after the wait is recorded `challenge` — retriable on the next run, deliberately *not* marked `empty`; a page with no deal cards is recorded `empty` (a day BookBub no longer serves; not retried); and under Cloudflare pressure (challenged pages or consecutive bad days) the between-sessions backoff doubles to let the block cool down. A login whose challenge never clears aborts the run cleanly — re-run later with a fresh `--link`.
 
+### De-duplicating repeated books
+
+A book can be featured on several days, so the same book can appear as multiple `deal` rows (one per date). `scripts/dedup_deals.py` collapses those repeats, keeping only the most recent deal for each book:
+
+```bash
+python scripts/dedup_deals.py [--db PATH] [--backup PATH] [--check]
+```
+
+- **Same-book identity** (`deals_db.book_identity`): the Amazon ASIN from `amazon_url` (`/dp/XXXXXXXXXX`, tracking suffix ignored) — a book re-featured on different dates shares its ASIN; deals with no Amazon link fall back to the normalised title+author pair.
+- **Keep most recent**: per book, the row with the newest `date` (tie → highest row `id`) is kept; only duplicates are removed — the kept row is never modified, and a second run removes 0 (idempotent).
+- **`--check`** previews: prints the stats (rows / distinct books / repeated books / rows that would be removed) and lists the removable rows without modifying anything.
+- **Automatic backup**: before removing anything, the DB is backed up with the WAL-safe sqlite backup API to `data/deals_pre_dedup_<YYYYMMDD-HHMMSS>.db` (gitignored via `data/`, path overridable with `--backup`) — the pre-dedup state can always be restored from it.
+- `--db` targets another deals DB (default `DEALS_DB` = `data/deals.db`).
+
 ### Configuration (env vars)
 
 The session link is never committed (it is a rotating signed token). The `BOOKBUB_*` / `LLM_*` settings in `app/config.py`:
