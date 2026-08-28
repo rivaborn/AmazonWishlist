@@ -350,6 +350,38 @@ sudo -u wishlist rm /opt/amazon-wishlist/data/wishlist.db*
 sudo systemctl start amazon-wishlist
 ```
 
+## Grimmory book catalog (data/grimmory.db)
+
+A one-off export of the home-lab **Grimmory** (BookLore) ebook libraries into this repo's `data/` directory. It is a separate SQLite file from `wishlist.db` with its own schema — a static catalog snapshot (title, author, publisher, date published, ISBN). Nothing in the web app reads or writes it; it is rebuilt by hand, not on a cron.
+
+`scripts/build_grimmory_db.py` logs into the Grimmory instance (JWT login via `POST /api/v1/auth/login`, see `app/grimmory.py`), resolves the target libraries by name, fetches every book per library (`GET /api/v1/libraries/{id}/book`), and rebuilds the `book` table in a single transaction (staging table renamed over the old one, so a failed run rolls back and the previous data is left intact):
+
+```bash
+GRIMMORY_USERNAME=... GRIMMORY_PASSWORD=... python scripts/build_grimmory_db.py
+```
+
+The `book` table is `id` (PK) plus `library_id`, `library_name`, `title`, `author`, `publisher`, `published_date` (ISO date), `isbn` (ISBN-13, falling back to ISBN-10). `author` is the author list comma-joined; `publisher`, `published_date`, and `isbn` are NULL when Grimmory has no value for that book.
+
+Missing target library, bad login, or an HTTP error exits non-zero with a `GRIMMORY DB BUILD FAILED: ...` message and leaves the existing table untouched. A quick probe — lists every library with its book count and exits non-zero if a configured target library name is missing:
+
+```bash
+GRIMMORY_USERNAME=... GRIMMORY_PASSWORD=... python -m app.grimmory
+```
+
+`data/grimmory.db` is **gitignored** (like the rest of `data/`) — the build is reproducible from the Grimmory libraries themselves, so the file is a local artifact, not part of the repo.
+
+### Configuration (env vars)
+
+Read at run time by `scripts/build_grimmory_db.py` / `app/grimmory.py`. The password is env-only on purpose — it is never written to a committed file.
+
+| var | default | meaning |
+| --- | --- | --- |
+| `GRIMMORY_URL` | `http://192.168.1.13:6060/` | Base URL of the Grimmory (BookLore) instance. |
+| `GRIMMORY_USERNAME` | *(unset)* | Username for `/api/v1/auth/login`. |
+| `GRIMMORY_PASSWORD` | *(unset)* | Password for `/api/v1/auth/login`. Supplied via the environment only, never committed. |
+| `GRIMMORY_LIBRARIES` | `Amazon fksogbetun,Amazon rivaborn` | Comma-separated names of the libraries to export. |
+| `GRIMMORY_DB` | `data/grimmory.db` | SQLite path of the catalog (gitignored via `data/`). |
+
 ## Notes / limitations
 
 - Amazon actively rate-limits scrapers. The defaults (midnight start, 1-hour pacing, 4–9 s per-page jitter, browser-like headers) are tuned to fly under the radar for accounts with a handful of wishlists totaling around 1,000 items. Larger accounts or noisier IPs may still see occasional bot-blocks; the app preserves the prior state when this happens and saves the offending HTML to `data/diagnostics/`.
