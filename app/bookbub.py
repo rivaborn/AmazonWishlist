@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as _dt
+import random
 import sys
 import time
 from dataclasses import dataclass
@@ -292,6 +293,98 @@ def fetch_daily_deals_playwright(link: str, date: str, headless: bool = True) ->
         finally:
             browser.close()
     return parse_deals(html)
+
+
+def _is_challenged(page) -> bool:
+    """True if the page is (still) the Cloudflare "Just a moment…" interstitial."""
+    return "just a moment" in (page.title() or "").lower()
+
+
+def fetch_daily_deals_many(dates: list[str], link: str | None = None, headless: bool = True,
+                           inter_date_delay: float = 0.0,
+                           challenged: set[str] | None = None) -> dict[str, list[Deal]]:
+    """Fetch several daily-deals pages in ONE logged-in browser session.
+
+    Logs in once via the outbound ``link`` (clearing the Cloudflare managed
+    challenge), then navigates to ``?date=YYYYMMDD`` for each date in
+    ``dates`` (in order) on the same session — reusing the login instead of
+    paying the login+challenge cost per date.
+
+    Every date is best-effort: a date whose page re-challenges or carries no
+    deal cards yields an *empty list* for that date (recorded, never an
+    abort). Two hard aborts:
+
+    * ``BookbubError`` if no ``link`` is available, and
+    * ``BookbubError`` if the login page never clears the challenge (a dead /
+      stale session — no point continuing with one).
+
+    ``challenged`` (optional set) is filled with the dates whose page was
+    still on the interstitial after the wait, so callers can distinguish
+    "re-challenged" (retriable) from "genuinely no deals".
+    ``inter_date_delay`` (seconds) paces the navigations with ±25% jitter.
+
+    Returns ``{date: [Deal, ...]}`` with every input date as a key.
+    """
+    link = link or BOOKBUB_LOGIN_LINK
+    if not link:
+        raise BookbubError("no BookBub login link: pass --link or set BOOKBUB_LOGIN_LINK")
+    if not dates:
+        return {}
+    if challenged is None:
+        challenged = set()
+
+    from playwright.sync_api import sync_playwright  # lazy: optional dependency
+
+    result: dict[str, list[Deal]] = {}
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(headless=headless, args=_launch_args())
+        try:
+            ctx = browser.new_context(
+                user_agent=USER_AGENT,
+                viewport={"width": 1366, "height": 900},
+                locale="en-US",
+            )
+            page = ctx.new_page()
+            # 1. Outbound link: auto-login + clears the Cloudflare challenge,
+            #    landing on the daily-deals page (for the link's own date).
+            page.goto(link, wait_until="domcontentloaded", timeout=60_000)
+            _load_deals(page)
+            if _is_challenged(page):
+                raise BookbubError(
+                    "Cloudflare challenge never cleared after the outbound-link login — "
+                    "the link may be stale/expired, or Cloudflare is hard-blocking the browser"
+                )
+
+            for i, date in enumerate(dates):
+                html: str | None
+                # The landing page already IS the first date's daily-deals view
+                # when the link's own ?date= matches it: parse it as-is — a
+                # redundant reload of the same URL re-triggers the challenge.
+                if i == 0 and _on_daily_deals_for_date(page, date):
+                    html = page.content()
+                else:
+                    try:
+                        page.goto(_deals_url(date), wait_until="domcontentloaded", timeout=60_000)
+                        _load_deals(page)
+                        html = page.content()
+                    except Exception:
+                        # Navigation hiccup: record the date as empty and keep
+                        # the session going (best-effort per date).
+                        html = None
+                if html is None:
+                    result[date] = []
+                else:
+                    if _is_challenged(page):
+                        challenged.add(date)
+                    result[date] = parse_deals(html)
+                if i < len(dates) - 1 and inter_date_delay > 0:
+                    time.sleep(inter_date_delay * random.uniform(0.75, 1.25))
+        finally:
+            browser.close()
+
+    for d in result.values():
+        resolve_amazon_urls(d)
+    return result
 
 
 def resolve_amazon_urls(deals: list[Deal], *, timeout: float = 30.0) -> list[Deal]:
