@@ -1,0 +1,59 @@
+# Amazon Wishlist live-deal verifier (scripts/verify_deals.py) run INSIDE the
+# `wlvpn` NordVPN/WireGuard namespace so ONLY its Amazon price reads egress
+# through NordVPN. The rest of the box (SSH, LAN, the wishlist scraper itself)
+# is unaffected.
+#
+# amazon-wishlist-vpn.service is the tunnel (up/down scripts, oneshot +
+# RemainAfterExit, owns the namespace). This unit places the verifier in that
+# namespace at start and binds the namespace's Nord DNS over /etc/resolv.conf
+# (systemd does not apply the /etc/netns convention itself). BindsTo= the
+# tunnel unit so the verifier stops too if the tunnel stops.
+#
+# The NordVPN session is already negotiated by amazon-wishlist-vpn.service as
+# WISHLIST_VPN_USER — this unit needs NO NordVPN credentials and stores none.
+# Per-host settings (DEALS_DB, VERIFY_*, WISHLIST_VPN_*) go in
+# /etc/default/amazon-wishlist; install_systemd.sh reinstalls this unit from
+# the repo on every deploy, so a hand-edit here is reverted. (If you override
+# WISHLIST_VPN_NS away from the default `wlvpn`, update this unit's
+# NetworkNamespacePath/BindReadOnlyPaths and the --netns argument too.)
+#
+# Run the real pass:  systemctl start amazon-wishlist-verify.service
+# Follow progress:    journalctl -u amazon-wishlist-verify -f
+# A finished pass is a fast no-op re-run (verified rows are skipped — the
+# resume cursor is deal_status in DEALS_DB, not any file).
+
+[Unit]
+Description=Amazon Wishlist live-deal verifier (via wlvpn VPN namespace)
+After=amazon-wishlist-vpn.service
+Requires=amazon-wishlist-vpn.service
+BindsTo=amazon-wishlist-vpn.service
+
+[Service]
+User=wishlist
+Group=wishlist
+WorkingDirectory=/opt/amazon-wishlist
+# Run inside the VPN namespace; bind its Nord DNS over /etc/resolv.conf.
+NetworkNamespacePath=/var/run/netns/wlvpn
+BindReadOnlyPaths=/etc/netns/wlvpn/resolv.conf:/etc/resolv.conf
+# Headless Chromium (the price reader) needs the same browser/home environment
+# as the app unit — the browser lives only under /opt/amazon-wishlist.
+Environment="HOME=/opt/amazon-wishlist"
+Environment="XDG_RUNTIME_DIR=/tmp/runtime-wishlist"
+Environment="PLAYWRIGHT_BROWSERS_PATH=/opt/amazon-wishlist/.cache/playwright"
+Environment="PLAYWRIGHT_HOST_PLATFORM_OVERRIDE=ubuntu24.04-x64"
+# Per-host overrides (DEALS_DB, VERIFY_*, WISHLIST_VPN_*). Optional: the
+# leading `-` means an install that keeps the defaults needs no such file.
+EnvironmentFile=-/etc/default/amazon-wishlist
+ExecStart=/opt/amazon-wishlist/.venv/bin/python scripts/verify_deals.py --netns wlvpn
+Restart=on-failure
+RestartSec=30
+# Hardening (mirrors amazon-wishlist.service: chromium's multi-process model —
+# zygote / crashpad / shared /tmp sockets — breaks under stricter settings;
+# see the NOTE in that unit).
+NoNewPrivileges=true
+ProtectSystem=false
+PrivateTmp=false
+ReadWritePaths=/opt/amazon-wishlist/data /opt/amazon-wishlist/.cache
+
+[Install]
+WantedBy=multi-user.target
