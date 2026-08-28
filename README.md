@@ -382,6 +382,51 @@ Read at run time by `scripts/build_grimmory_db.py` / `app/grimmory.py`. The pass
 | `GRIMMORY_LIBRARIES` | `Amazon fksogbetun,Amazon rivaborn` | Comma-separated names of the libraries to export. |
 | `GRIMMORY_DB` | `data/grimmory.db` | SQLite path of the catalog (gitignored via `data/`). |
 
+## BookBub daily ebook deals (booklist.md)
+
+A one-off pull of the daily [BookBub](https://www.bookbub.com) ebook-deal list, keyed off the **outbound link in the daily BookBub email**. That link is a signed, single-use auto-login: following it logs you into bookbub.com and lands on that day's daily-deals page. The deals themselves are served from `https://www.bookbub.com/ebook-deals/daily-deals?date=YYYYMMDD`, and any date can be opened in the same logged-in session.
+
+BookBub sits behind a Cloudflare “Just a moment…” managed challenge, so a plain HTTP client is stopped at the interstitial. `app/bookbub.py` tries a lightweight httpx path first and, when that is interstitial-ed (the current case), falls back to Chromium driven by Playwright (headless, then headful as a retry) which executes the challenge and parses the deal cards.
+
+### Running it
+
+```bash
+python scripts/build_bookbub_deals.py --link '<outbound link from the daily email>' [--date YYYYMMDD] [--out PATH]
+```
+
+- `--link` — today's outbound email link, or the `BOOKBUB_LOGIN_LINK` env var. It **rotates daily** — use the link from the email you just received; a stale one will not log in.
+- `--date` — day to pull, `YYYYMMDD` (default: today).
+- `--out` — report path (default: `booklist.md` at the repo root).
+- `--llm-model` — optional: normalise the list through the local LLM gateway (see below).
+
+The script fetches the deals, then writes the report atomically (tmp + replace), so a failed run never leaves a half-written file. Exit codes: `0` written, `1` fetch/parse error or an empty day, `2` missing `--link`.
+
+A quick probe that prints the day's deals without writing the file (also supports `--headless`/`--headful` if Cloudflare keeps challenging headless):
+
+```bash
+python -m app.bookbub --link '<outbound link>' [--date YYYYMMDD]
+```
+
+### Output
+
+`booklist.md` at the repo root — a heading with the date and a table with one row per deal: **title** (linked to the BookBub book page), **author**, and **deal price** (`$X.XX`, or `Free!` for free deals). It is a generated daily report, rewritten on every run.
+
+### Configuration (env vars)
+
+The session link is never committed (it is a rotating signed token). The `BOOKBUB_*` / `LLM_*` settings in `app/config.py`:
+
+| var | default | meaning |
+| --- | --- | --- |
+| `BOOKBUB_LOGIN_LINK` | *(unset)* | The outbound auto-login link from the email. Supplied per run via `--link` or this var. |
+| `BOOKBUB_DAILY_DEALS_BASE` | `https://www.bookbub.com/ebook-deals/daily-deals` | Daily-deals page; the day is the `?date=YYYYMMDD` query arg. |
+| `BOOKBUB_DATE_FORMAT` | `%Y%m%d` | strftime format of the `?date=` value. |
+| `BOOKBUB_OUTPUT` | `booklist.md` (repo root) | Where the report is written. |
+| `LLM_BASE_URL` | `http://192.168.1.40:11430/v1` | Local LLMConfig gateway (OpenAI-compatible) used for optional normalisation. |
+| `LLM_MODEL` | *(unset = off)* | Model for `--llm-model`. The deterministic parse is the deliverable — an unavailable model/gateway only logs a warning and writes the parsed list as-is. |
+| `LLM_TIMEOUT` | `120` | Timeout (seconds) for the LLM call. |
+
+The local LLM gateway is an **optional normalisation step, off by default**: `--llm-model`/`LLM_MODEL` reformat the parsed list via `POST {LLM_BASE_URL}/chat/completions`. It never blocks the write — on any failure the raw parsed list is written instead.
+
 ## Notes / limitations
 
 - Amazon actively rate-limits scrapers. The defaults (midnight start, 1-hour pacing, 4–9 s per-page jitter, browser-like headers) are tuned to fly under the radar for accounts with a handful of wishlists totaling around 1,000 items. Larger accounts or noisier IPs may still see occasional bot-blocks; the app preserves the prior state when this happens and saves the offending HTML to `data/diagnostics/`.
