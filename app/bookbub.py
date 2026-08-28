@@ -1,0 +1,342 @@
+"""BookBub daily ebook deals client + parser.
+
+Reads the day's ebook deals from bookbub.com using the signed outbound link
+from the daily BookBub email (the one that auto-logs you into BookBub).
+
+BookBub sits behind a Cloudflare "Just a moment..." managed challenge, so a
+plain ``httpx`` client is stopped at the challenge page before it ever sees the
+deals. This module therefore tries a lightweight httpx pass first (it will work
+if the site ever relaxes bot-gating, and it is cheap) and, when that yields an
+auth-wall or zero deals, falls back to Chromium driven by Playwright, which
+executes the challenge JS, keeps the login cookies the outbound link set, and
+renders the deal cards.
+
+Flow (mirrors the httpx<->playwright fallback used elsewhere in this app):
+
+  1. Follow the outbound link — it logs the visitor in and lands on the
+     daily-deals page (the link itself carries the target ``?date=``).
+  2. Navigate (same session) to ``/ebook-deals/daily-deals?date=YYYYMMDD``.
+  3. Parse each deal card: title, author(s), deal price, book URL.
+"""
+
+from __future__ import annotations
+
+import argparse
+import datetime as _dt
+import sys
+import time
+from dataclasses import dataclass
+from urllib.parse import parse_qs, urljoin, urlparse
+
+import httpx
+from selectolax.parser import HTMLParser
+
+from .config import (
+    BOOKBUB_DAILY_DEALS_BASE,
+    BOOKBUB_DATE_FORMAT,
+    BOOKBUB_LOGIN_LINK,
+    USER_AGENT,
+)
+
+# Browser-like headers. BookBub's bot heuristics look at the full set, not
+# just the UA (same approach as app.scraper).
+HEADERS = {
+    "User-Agent": USER_AGENT,
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Encoding": "gzip, deflate, br",
+}
+
+_BASE = "https://www.bookbub.com"
+
+# ---- Deal-card selectors (confirmed against the live rendered page) ---------
+# Each deal is a `.books-feed-item-container`. Inside it:
+#   .book-info-title            -> <a href="/books/...">Title</a>   (title + url)
+#   .book-info-authors .person-name -> author(s) (one per author)
+#   .deal-price .discount-price -> the deal price, e.g. "$2.99"
+#   .deal-price .original-price -> retail/strikethrough price
+#   .discount-price-free        -> present instead for $0 deals ("Free!")
+CARD = ".books-feed-item-container"
+TITLE = ".book-info-title"
+# Author names live in the /authors/ links inside .book-info-authors. BookBub packs
+# multiple authors into a single .person-name div ("<a>Iris</a> and <a>Roy</a>"),
+# so selecting the author links — not the container text — keeps names clean.
+AUTHORS = ".book-info-authors a[href*='/authors/']"
+DEAL_PRICE = ".deal-price .discount-price"
+FREE_PRICE = ".discount-price-free"
+ORIGINAL_PRICE = ".deal-price .original-price"
+
+
+class BookbubError(RuntimeError):
+    """Raised on a failed login, a fetch error, or when no deals are found."""
+
+
+@dataclass
+class Deal:
+    title: str
+    author: str
+    price: str
+    url: str
+
+
+# --------------------------------------------------------------------------- #
+# Parsing
+# --------------------------------------------------------------------------- #
+def parse_deals(html: str) -> list[Deal]:
+    """Parse deal cards out of a rendered daily-deals page.
+
+    Returns a de-duplicated, order-preserving list of :class:`Deal`. Tolerates
+    cards with missing price/author (those fields come back empty).
+    """
+    tree = HTMLParser(html)
+    deals: list[Deal] = []
+    seen: set[str] = set()
+    for card in tree.css(CARD):
+        title_el = card.css_first(TITLE)
+        if title_el is None:
+            continue
+        title = title_el.text(strip=True) or ""
+        if not title:
+            continue
+
+        url = title_el.attributes.get("href", "") if title_el.attributes else ""
+        url = urljoin(_BASE, url) if url else ""
+
+        authors = [a.text(strip=True) for a in card.css(AUTHORS)]
+        authors = [a for a in authors if a]
+        author = ", ".join(authors)
+
+        price_el = card.css_first(DEAL_PRICE)
+        if price_el is None:
+            price_el = card.css_first(FREE_PRICE)
+        price = price_el.text(strip=True) if price_el is not None else ""
+
+        key = url or f"{title}|{author}|{price}"
+        if key in seen:
+            continue
+        seen.add(key)
+        deals.append(Deal(title=title, author=author, price=price, url=url))
+    return deals
+
+
+# --------------------------------------------------------------------------- #
+# httpx pass (fast, but stopped by Cloudflare today)
+# --------------------------------------------------------------------------- #
+def _is_cloudflare_challenge(resp: httpx.Response) -> bool:
+    """Heuristic: does this response look like a Cloudflare interstitial?"""
+    if resp.status_code in (403, 503) and "just a moment" in resp.text[:4000].lower():
+        return True
+    head = resp.text[:8000]
+    return (
+        "just a moment" in head.lower()
+        and ("cf_chl" in head or "challenge-platform" in head or "challenges.cloudflare.com" in head)
+    )
+
+
+def _deals_url(date: str) -> str:
+    return f"{BOOKBUB_DAILY_DEALS_BASE}?date={date}"
+
+
+def outbound_session(link: str) -> httpx.Client:
+    """Follow the outbound link (redirect chain + cookie jar) and return an open client.
+
+    Following the redirect chain lands on bookbub.com and sets the BookBub login
+    cookies on the client's jar. The caller owns the returned client and must
+    close it. (For a real browser this same step also clears the Cloudflare
+    managed challenge; httpx captures the cookies but cannot execute the
+    challenge JS, which is why the Playwright fallback exists.)
+    """
+    client = httpx.Client(headers=HEADERS, follow_redirects=True, timeout=40)
+    client.get(link)
+    return client
+
+
+def fetch_daily_deals_httpx(link: str, date: str) -> list[Deal]:
+    """Attempt the whole flow with httpx (cookie jar + redirect following).
+
+    Returns the parsed deals, or an empty list if the session was never
+    authenticated (e.g. Cloudflare interstitial) — the caller then falls back
+    to Playwright. A network failure (unreachable host, timeout, TLS) is
+    surfaced as :class:`BookbubError` so the caller can try the browser path
+    instead of leaking a raw httpx traceback.
+    """
+    try:
+        client = outbound_session(link)
+        try:
+            resp = client.get(_deals_url(date))
+        finally:
+            client.close()
+    except httpx.HTTPError as e:
+        raise BookbubError(f"BookBub unreachable via httpx: {e}") from e
+    if _is_cloudflare_challenge(resp):
+        return []
+    if resp.status_code != 200:
+        raise BookbubError(f"HTTP {resp.status_code} on {_deals_url(date)}")
+    return parse_deals(resp.text)
+
+
+# --------------------------------------------------------------------------- #
+# Playwright pass (clears the Cloudflare challenge)
+# --------------------------------------------------------------------------- #
+def _launch_args() -> list[str]:
+    # --disable-blink-features=AutomationControlled hides the default
+    # navigator.webdriver flag; needed to get through the Cloudflare challenge.
+    return ["--disable-blink-features=AutomationControlled", "--no-default-browser-check"]
+
+
+def _wait_past_challenge(page, timeout_s: float = 60.0) -> bool:
+    """Poll until the page title is no longer the Cloudflare interstitial."""
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        title = (page.title() or "").lower()
+        if "just a moment" not in title:
+            return True
+        time.sleep(1.5)
+    return False
+
+
+def _on_daily_deals_for_date(page, date: str) -> bool:
+    """True if the current page is already the daily-deals view for ``date``."""
+    try:
+        parsed = urlparse(page.url)
+        if "daily-deals" not in parsed.path:
+            return False
+        return parse_qs(parsed.query).get("date", [None])[0] == date
+    except Exception:
+        return False
+
+
+def _load_deals(page) -> None:
+    """Wait for the Cloudflare challenge to clear and the deal cards to render."""
+    _wait_past_challenge(page)
+    try:
+        page.wait_for_selector(CARD, timeout=25_000)
+    except Exception:
+        pass  # blocked or empty; parse will yield [] and the caller retries
+    time.sleep(2)
+
+
+def fetch_daily_deals_playwright(link: str, date: str, headless: bool = True) -> list[Deal]:
+    """Log in via the outbound link and read the daily-deals page in Chromium.
+
+    The outbound link auto-logs the visitor in and lands directly on the
+    daily-deals page for *the link's own date*. If that is the requested date
+    we parse it as-is — a redundant reload of the same URL re-triggers the
+    Cloudflare managed challenge and is flaky. We only navigate again when the
+    requested date differs from the landing date.
+    """
+    from playwright.sync_api import sync_playwright  # lazy: optional dependency
+
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(headless=headless, args=_launch_args())
+        try:
+            ctx = browser.new_context(
+                user_agent=USER_AGENT,
+                viewport={"width": 1366, "height": 900},
+                locale="en-US",
+            )
+            page = ctx.new_page()
+            # 1. Outbound link: auto-login + clears the Cloudflare challenge,
+            #    landing on the daily-deals page (for the link's date).
+            page.goto(link, wait_until="domcontentloaded", timeout=60_000)
+            _load_deals(page)
+            if _on_daily_deals_for_date(page, date):
+                html = page.content()
+            else:
+                # 2. Same session, navigate to the requested day.
+                page.goto(_deals_url(date), wait_until="domcontentloaded", timeout=60_000)
+                _load_deals(page)
+                html = page.content()
+        finally:
+            browser.close()
+    return parse_deals(html)
+
+
+# --------------------------------------------------------------------------- #
+# Public entry point
+# --------------------------------------------------------------------------- #
+def fetch_daily_deals(date: str, link: str | None = None, headless: bool | None = None) -> list[Deal]:
+    """Fetch the day's deals, falling back from httpx to Playwright.
+
+    ``link`` defaults to ``BOOKBUB_LOGIN_LINK`` (the daily email's outbound
+    link). ``headless`` pins the browser mode; when ``None`` headless is tried
+    first and headful as a retry (headful clears Cloudflare more reliably).
+    """
+    link = link or BOOKBUB_LOGIN_LINK
+    if not link:
+        raise BookbubError("no BookBub login link: pass --link or set BOOKBUB_LOGIN_LINK")
+
+    # Fast path — only useful if Cloudflare isn't interstitial-ing us.
+    try:
+        deals = fetch_daily_deals_httpx(link, date)
+        if deals:
+            return deals
+    except BookbubError:
+        pass
+
+    # Browser fallback — the path that actually clears Cloudflare.
+    modes = [headless] if headless is not None else [True, False]
+    last_err: Exception | None = None
+    for mode in modes:
+        try:
+            deals = fetch_daily_deals_playwright(link, date, headless=mode)
+        except Exception as e:  # noqa: BLE001 - surface a clean error below
+            last_err = e
+            continue
+        if deals:
+            return deals
+    raise BookbubError(
+        f"no BookBub deals found for {date} (httpx and the browser "
+        f"{'both headless and headful' if len(modes) > 1 else f'browser (headless={modes[0]})'} "
+        f"all returned nothing"
+        + (f"; last error: {last_err}" if last_err else "")
+        + " — the outbound link may be stale/expired or Cloudflare may have challenged the browser)"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# __main__ probe
+# --------------------------------------------------------------------------- #
+def _normalise_date(raw: str | None) -> str:
+    """Return a bare YYYYMMDD. Default to today; accept YYYYMMDD or YYYY-MM-DD."""
+    if not raw:
+        return _dt.date.today().strftime(BOOKBUB_DATE_FORMAT)
+    digits = "".join(ch for ch in raw if ch.isdigit())
+    if len(digits) != 8:
+        raise SystemExit(f"--date must be YYYYMMDD (or YYYY-MM-DD), got: {raw!r}")
+    return digits
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Probe BookBub daily deals (login + fetch + parse).")
+    parser.add_argument("--link", default=None, help="Outbound auto-login link from the daily email.")
+    parser.add_argument("--date", default=None, help="Day to fetch, YYYYMMDD (default: today).")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--headless", dest="headless", action="store_true", default=None,
+                      help="Force headless Chromium (default when nothing is given).")
+    mode.add_argument("--headful", dest="headless", action="store_false",
+                      help="Force headful Chromium (better if Cloudflare blocks headless).")
+    args = parser.parse_args(argv)
+
+    link = args.link or BOOKBUB_LOGIN_LINK
+    date = _normalise_date(args.date)
+    try:
+        deals = fetch_daily_deals(date, link=link, headless=args.headless)
+    except BookbubError as e:
+        print(f"BOOKBUB PROBE FAILED: {e}", file=sys.stderr)
+        return 1
+
+    if not deals:
+        print("BOOKBUB PROBE FAILED: no deals parsed", file=sys.stderr)
+        return 1
+
+    for i, d in enumerate(deals, 1):
+        print(f"{i}. {d.title} — {d.author} — {d.price}")
+        if d.url:
+            print(f"   {d.url}")
+    print(f"\n{len(deals)} deals for {date}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
