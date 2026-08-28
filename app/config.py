@@ -213,6 +213,13 @@ BOOKBUB_OUTPUT = Path(os.environ.get("BOOKBUB_OUTPUT", BASE_DIR / "booklist.md")
 # gitignored via data/. Re-runs upsert per date; history is kept for audit.
 DEALS_DB = Path(os.environ.get("DEALS_DB", DATA_DIR / "deals.db"))
 
+# Live-deal verification (scripts/verify_deals.py): the deal_status values
+# written into the `deal` table when we check a book's current Amazon price
+# against the stored deal_price. See app.deals_db.classify_deal.
+DEAL_STATUS_CURRENT = "current"
+DEAL_STATUS_EXPIRED = "expired"
+DEAL_STATUS_UNKNOWN = "unknown"
+
 # Backfill of historical daily deals (scripts/backfill_bookbub_deals.py): walk
 # [BOOKBUB_BACKFILL_END .. BOOKBUB_BACKFILL_START] day by day and store each
 # day's deals in DEALS_DB. Dates are already recorded (DEALS_DB rows or the

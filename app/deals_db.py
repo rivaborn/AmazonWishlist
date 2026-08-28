@@ -25,6 +25,12 @@ import re
 import sqlite3
 from pathlib import Path
 
+from .config import (
+    DEAL_STATUS_CURRENT,
+    DEAL_STATUS_EXPIRED,
+    DEAL_STATUS_UNKNOWN,
+)
+
 __all__ = [
     "SCHEMA_SQL",
     "ensure_schema",
@@ -35,6 +41,11 @@ __all__ = [
     "store_deals",
     "book_identity",
     "deduplicate",
+    "asin_from_amazon_url",
+    "pending_deals",
+    "mark_verified",
+    "parse_price_cents",
+    "classify_deal",
 ]
 
 # --------------------------------------------------------------------------- #
@@ -52,7 +63,10 @@ CREATE TABLE IF NOT EXISTS deal (
     amazon_url         TEXT,                                  -- NULL when no Amazon edition
     no_amazon_link     INTEGER NOT NULL DEFAULT 0,             -- 1 when amazon_url IS NULL
     owned_in_grimmory  INTEGER,                                -- 1 owned / 0 not / NULL = grimmory unavailable
-    audited_at         TEXT
+    audited_at         TEXT,
+    deal_status        TEXT,                                   -- NULL=unchecked, else current|expired|unknown
+    current_price      TEXT,                                   -- last read Amazon price text
+    verified_at        TEXT                                     -- ISO time of the last live check
 );
 CREATE UNIQUE INDEX IF NOT EXISTS uq_deal_date_bub ON deal(date, bookbub_url);
 """
@@ -61,6 +75,19 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_deal_date_bub ON deal(date, bookbub_url);
 def ensure_schema(conn: sqlite3.Connection) -> None:
     """Create the deals schema if missing (idempotent)."""
     conn.executescript(SCHEMA_SQL)
+    _migrate(conn)
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """In-place upgrades for older deals databases (mirrors app/db.py).
+
+    Each step is a no-op if the column already exists, so this is safe to run
+    on a fresh DB (where the columns come from SCHEMA_SQL) or an existing one.
+    """
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(deal)").fetchall()}
+    for col in ("deal_status", "current_price", "verified_at"):
+        if col not in cols:
+            conn.execute(f"ALTER TABLE deal ADD COLUMN {col} TEXT")
 
 
 def connect(path: str | Path) -> sqlite3.Connection:
@@ -206,6 +233,18 @@ def store_deals(deals, date: str, *, deals_path: str | Path, grimmory_path: str 
 _ASIN_RE = re.compile(r"/dp/([A-Z0-9]{10})")
 
 
+def asin_from_amazon_url(amazon_url: str | None) -> str | None:
+    """The 10-char Amazon ASIN in ``amazon_url`` (``/dp/XXXXXXXXXX``), or None.
+
+    None when the URL is missing or carries no ASIN (an unresolved BookBub
+    intermediate link, or a no-Amazon deal).
+    """
+    if not amazon_url:
+        return None
+    m = _ASIN_RE.search(amazon_url)
+    return m.group(1) if m else None
+
+
 def book_identity(title: str | None, author: str | None, amazon_url: str | None) -> tuple:
     """Identity for "the same book", used for deduplication and auditing.
 
@@ -243,3 +282,110 @@ def deduplicate(conn: sqlite3.Connection) -> int:
     for row_id in removed:
         conn.execute("DELETE FROM deal WHERE id = ?", (row_id,))
     return len(removed)
+
+
+# --------------------------------------------------------------------------- #
+# Live-deal verification (price check against current Amazon)
+# --------------------------------------------------------------------------- #
+_CURRENCY_RE = re.compile(r"\$\s?(\d{1,3}(?:,\d{3})*(?:\.\d{1,2})?|\d+(?:\.\d{1,2})?)")
+
+
+def _num_to_cents(token: str) -> int:
+    """'$X' token (comma-grouped, optional 1-2 digit cents) -> integer cents."""
+    token = token.replace(",", "")
+    if "." in token:
+        dollars, frac = token.split(".", 1)
+        frac = (frac + "00")[:2]
+        return int(dollars or 0) * 100 + int(frac)
+    return int(token or 0) * 100
+
+
+def parse_price_cents(text: str | None) -> int | None:
+    """Parse a price string into integer cents, or None when unreadable.
+
+    Handles "``$2.99``", "``$1,299.99``", "``Free``" / "``Free with Kindle
+    Unlimited``" (→ 0), a bare "``0``" (→ 0) and price ranges (the first bound
+    is used).
+    """
+    if text is None:
+        return None
+    s = str(text).strip()
+    if not s:
+        return None
+    if "free" in s.lower():
+        return 0
+    if re.fullmatch(r"0(?:\.0{1,2})?", s):
+        return 0
+    m = _CURRENCY_RE.search(s)
+    if m:
+        return _num_to_cents(m.group(1))
+    return None
+
+
+def pending_deals(conn: sqlite3.Connection, limit: int | None = None) -> list[dict]:
+    """Unverified deals that have an Amazon ASIN, in row order.
+
+    Returns ``{id, asin, amazon_url, deal_price, title}`` for rows where
+    ``deal_status IS NULL`` and whose ``amazon_url`` contains an ASIN.
+    ``limit`` caps the number of dicts returned (after the ASIN filter).
+    """
+    rows = conn.execute(
+        "SELECT id, amazon_url, deal_price, title FROM deal "
+        "WHERE deal_status IS NULL AND amazon_url IS NOT NULL ORDER BY id"
+    ).fetchall()
+    out: list[dict] = []
+    for row_id, url, deal_price, title in rows:
+        asin = asin_from_amazon_url(url)
+        if asin:
+            out.append(
+                {
+                    "id": row_id,
+                    "asin": asin,
+                    "amazon_url": url,
+                    "deal_price": deal_price,
+                    "title": title,
+                }
+            )
+            if limit is not None and len(out) >= limit:
+                break
+    return out
+
+
+def mark_verified(
+    conn: sqlite3.Connection,
+    row_id: int,
+    *,
+    status: str,
+    current_price: str | None,
+    at: str,
+) -> None:
+    """Record a live-check result for a deal row (the caller commits)."""
+    conn.execute(
+        "UPDATE deal SET deal_status = ?, current_price = ?, verified_at = ? WHERE id = ?",
+        (status, current_price, at, row_id),
+    )
+
+
+def classify_deal(deal_price: str | None, current_price: str | None) -> tuple[str, int | None]:
+    """Classify a deal by comparing the stored deal price to the current price.
+
+    Returns ``(status, current_cents)`` where status is one of
+    ``DEAL_STATUS_CURRENT`` / ``DEAL_STATUS_EXPIRED`` / ``DEAL_STATUS_UNKNOWN``:
+
+    * current price unparseable → unknown (never guessed)
+    * current price free/0 → current
+    * deal price unparseable → unknown
+    * current price > deal price → expired
+    * otherwise (at or below the deal price) → current
+    """
+    cur = parse_price_cents(current_price)
+    if cur is None:
+        return (DEAL_STATUS_UNKNOWN, None)
+    if cur == 0:
+        return (DEAL_STATUS_CURRENT, 0)
+    deal = parse_price_cents(deal_price)
+    if deal is None:
+        return (DEAL_STATUS_UNKNOWN, cur)
+    if cur > deal:
+        return (DEAL_STATUS_EXPIRED, cur)
+    return (DEAL_STATUS_CURRENT, cur)
