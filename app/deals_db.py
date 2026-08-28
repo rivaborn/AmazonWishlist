@@ -33,6 +33,8 @@ __all__ = [
     "owned_lookup",
     "upsert_deals",
     "store_deals",
+    "book_identity",
+    "deduplicate",
 ]
 
 # --------------------------------------------------------------------------- #
@@ -196,3 +198,48 @@ def store_deals(deals, date: str, *, deals_path: str | Path, grimmory_path: str 
     owned = sum(1 for v in owned_map.values() if v == 1)
     no_amazon = sum(1 for d in deals if not d.amazon_url)
     return stored, owned, no_amazon
+
+
+# --------------------------------------------------------------------------- #
+# Deduplication (a book re-featured on multiple dates)
+# --------------------------------------------------------------------------- #
+_ASIN_RE = re.compile(r"/dp/([A-Z0-9]{10})")
+
+
+def book_identity(title: str | None, author: str | None, amazon_url: str | None) -> tuple:
+    """Identity for "the same book", used for deduplication and auditing.
+
+    Prefers the canonical Amazon ASIN (``/dp/XXXXXXXXXX``) from
+    ``amazon_url`` — a book re-featured on different dates shares its ASIN
+    (the ``?_bbid=…&tag=…`` tracking suffix is ignored). Falls back to the
+    normalised ``(title, author)`` pair when there is no Amazon link.
+    """
+    if amazon_url:
+        m = _ASIN_RE.search(amazon_url)
+        if m:
+            return ("asin", m.group(1))
+    return ("meta", normalise(title), normalise(author))
+
+
+def deduplicate(conn: sqlite3.Connection) -> int:
+    """Remove repeated books, keeping the most recent deal for each.
+
+    Groups rows by :func:`book_identity`; in every group of duplicates the
+    row with the largest ``date`` (YYYYMMDD, lexicographic = chronological)
+    is kept — a same-date tie keeps the highest ``id`` (most recent insert).
+    Only DELETEs (never updates or merges, so the kept row retains all its
+    own columns and date); idempotent — a second call removes 0. Returns the
+    number of rows removed; the caller commits.
+    """
+    rows = conn.execute("SELECT id, date, title, author, amazon_url FROM deal").fetchall()
+    latest: dict = {}  # identity -> (date, id) of the keeper
+    for row_id, date, title, author, amazon_url in rows:
+        ident = book_identity(title, author, amazon_url)
+        cand = (date or "", row_id)
+        if ident not in latest or cand > latest[ident]:
+            latest[ident] = cand
+    keep = {row_id for _ident, (_date, row_id) in latest.items()}
+    removed = {row_id for (row_id, _d, _t, _a, _u) in rows} - keep
+    for row_id in removed:
+        conn.execute("DELETE FROM deal WHERE id = ?", (row_id,))
+    return len(removed)
