@@ -3,9 +3,12 @@
 
 Logs into BookBub via the signed outbound link from the daily email
 (``--link`` or ``BOOKBUB_LOGIN_LINK``), fetches the day's ebook deals
-(``app.bookbub``), and writes a markdown report to ``--out`` (default
-``BOOKBUB_OUTPUT`` = ``<repo root>/booklist.md``). The write is atomic
-(tmp file + ``os.replace``) so a crash never leaves a half-written report.
+(``app.bookbub``), stores them in the deals database (``DEALS_DB`` =
+``data/deals.db``) with the resolved Amazon link and an owned-in-grimmory
+audit flag, and writes a markdown report to ``--out`` (default
+``BOOKBUB_OUTPUT`` = ``<repo root>/booklist.md``) that links each title to
+its Amazon Kindle page. The write is atomic (tmp file + ``os.replace``) so a
+crash never leaves a half-written report.
 
 Usage (from the repo root):
 
@@ -24,8 +27,10 @@ Exit codes: 0 = written; 1 = fetch/parse error; 2 = missing --link / usage.
 """
 import argparse
 import os
+import sqlite3
 import sys
 import tempfile
+from datetime import datetime
 from pathlib import Path
 
 # `python scripts/build_bookbub_deals.py` puts scripts/ on sys.path[0], so make
@@ -35,9 +40,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import httpx  # noqa: E402
 
 from app import bookbub  # noqa: E402
+from app import deals_db  # noqa: E402
 from app.config import (  # noqa: E402
     BOOKBUB_LOGIN_LINK,
     BOOKBUB_OUTPUT,
+    DEALS_DB,
+    GRIMMORY_DB,
     LLM_BASE_URL,
     LLM_MODEL,
     LLM_TIMEOUT,
@@ -115,8 +123,11 @@ def _deals_to_markdown(deals: list, date: str) -> str:
     ]
     for d in deals:
         title = _md_escape(d.title)
-        if d.url:
-            title = f"[{title}]({d.url})"
+        # Link the title to the resolved Amazon Kindle page. When the deal has
+        # no Amazon edition there is no link (plain title) — the BookBub url is
+        # kept in the deals DB only, not in the report.
+        if d.amazon_url:
+            title = f"[{title}]({d.amazon_url})"
         lines.append(f"| {title} | {_md_escape(d.author)} | {_md_escape(d.price)} |")
     lines.append("")
     return "\n".join(lines)
@@ -136,6 +147,30 @@ def _write_atomic(path: Path, content: str) -> None:
         except OSError:
             pass
         raise
+
+
+# --------------------------------------------------------------------------- #
+# Deals database (audit store)
+# --------------------------------------------------------------------------- #
+def _store_deals(deals: list, date: str) -> tuple[int, int, int]:
+    """Store the deals in ``DEALS_DB`` (idempotent upsert per date).
+
+    Computes the owned-in-grimmory audit (NULL when grimmory.db is absent) and
+    writes every deal for ``date``. Returns ``(stored, owned, no_amazon)``.
+    Raises on a database error (the caller reports it and exits non-zero).
+    """
+    owned_map = deals_db.owned_lookup(deals, GRIMMORY_DB)
+    audited_at = datetime.now().isoformat(timespec="seconds")
+    conn = deals_db.connect(DEALS_DB)
+    try:
+        deals_db.ensure_schema(conn)
+        stored = deals_db.upsert_deals(conn, deals, date, owned_map, audited_at)
+        conn.commit()
+    finally:
+        conn.close()
+    owned = sum(1 for v in owned_map.values() if v == 1)
+    no_amazon = sum(1 for d in deals if not d.amazon_url)
+    return stored, owned, no_amazon
 
 
 # --------------------------------------------------------------------------- #
@@ -172,6 +207,14 @@ def main(argv: list[str] | None = None) -> int:
     if not deals:
         print(f"ERROR: no deals found for {date} — nothing to write", file=sys.stderr)
         return 1
+
+    try:
+        stored, owned, no_amazon = _store_deals(deals, date)
+    except sqlite3.Error as e:
+        print(f"ERROR: failed to store deals in {DEALS_DB}: {e}", file=sys.stderr)
+        return 1
+    print(f"stored {stored} deals for {date} in {DEALS_DB} "
+          f"({owned} owned in grimmory, {no_amazon} no-amazon-link)")
 
     body = _deals_to_markdown(deals, date)
     if args.llm_model:
