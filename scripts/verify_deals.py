@@ -4,8 +4,11 @@
 For every PENDING deal in the deals DB (``deal_status IS NULL`` with an
 Amazon ASIN) this orchestrator:
 
-1. ensures the NordVPN tunnel is connected (starting country from
-   ``NORDVPN_START_COUNTRY``),
+1. ensures the NordVPN tunnel is connected (host CLI; starting country from
+   ``NORDVPN_START_COUNTRY``) — or, in ``--netns`` tunnel mode (the Ubuntu
+   deployment: this process runs INSIDE a network namespace whose only route
+   is the NordLynx/WireGuard tunnel), that the namespace has live egress,
+   rebuilding it once via the tunnel unit when it is missing/dead,
 2. opens the book's ``amazon.com/dp/<ASIN>`` page in a Playwright context
    built from a rotated browser fingerprint (``app.fingerprint``),
 3. reads the current price (``app.amazon_price``), classifies the deal
@@ -14,10 +17,12 @@ Amazon ASIN) this orchestrator:
    and records the outcome via ``mark_verified`` (``deal_status`` /
    ``current_price`` / ``verified_at`` in DEALS_DB — the source of truth for
    resuming; ``data/verify_progress.json`` is an advisory telemetry mirror),
-4. every ``--rotate-every`` books (default 10) rotates the NordVPN exit IP
-   (new country/city) AND switches to a fresh fingerprint that differs in
-   User-Agent/locale/viewport, so the IP and the browser identity change
-   together,
+4. every ``--rotate-every`` books (default 10) refreshes the exit IP — host
+   CLI: connect to a new country/city; ``--netns``: best-effort tunnel
+   rebuild for a fresh session/exit IP (a not-permitted or failed rebuild
+   leaves the stable IP and the run continues) — AND switches to a fresh
+   fingerprint that differs in User-Agent/locale/viewport, so the IP and the
+   browser identity change together,
 5. paces per-book reads with a random jitter delay (``VERIFY_DELAY_MIN/MAX``)
    and retries transient failures (block page / navigation failure / no
    price) with backoff up to ``VERIFY_MAX_RETRIES`` — a book that stays
@@ -30,10 +35,20 @@ The operator runs the real pass over the real ``data/deals.db``; step
 verification runs a small bounded pass over a TEMP copy (``--db``) so the
 real DB is not mutated during review.
 
+Tunnel mode (Ubuntu deployment): pass ``--netns NS`` (``amazon-wishlist-verify.service``
+and ``scripts/vpn_verify.sh`` pass ``--netns wlvpn``) while running INSIDE the
+namespace. The host-CLI path (login/connect/rotate) is then unused and no
+NordVPN credentials are needed — the session was pre-negotiated by
+``amazon-wishlist-vpn.service`` as the operator user. Within the namespace the
+tunnel's exit IP is fixed for its life, so a per-N "rotation" is a best-effort
+rebuild (fresh IP when permitted; the fingerprint still rotates either way).
+
 Usage (from repo root, VPN + credentials available):
     python scripts/verify_deals.py --check
     python scripts/verify_deals.py --limit 25 --rotate-every 10
     NORDVPN_USERNAME=… NORDVPN_PASSWORD=… python scripts/verify_deals.py
+    # Ubuntu tunnel mode (the process runs inside the namespace):
+    python scripts/verify_deals.py --netns wlvpn --limit 25 --rotate-every 10
 """
 
 from __future__ import annotations
@@ -62,6 +77,7 @@ from app.config import (  # noqa: E402
     VERIFY_MAX_RETRIES,
     VERIFY_PROGRESS,
     VERIFY_RETRY_BACKOFF,
+    WISHLIST_VPN_UNIT,
 )
 
 log = logging.getLogger("verify_deals")
@@ -125,6 +141,28 @@ def _read_with_retries(
         time.sleep(VERIFY_RETRY_BACKOFF)
 
 
+def _ensure_tunnel(ns: str) -> tuple[bool, str | None]:
+    """Tunnel mode: make sure the namespace has live egress.
+
+    Returns ``(live, egress_ip)``. When the namespace is missing or dead it is
+    rebuilt once (best-effort ``systemctl restart`` of the tunnel unit — needs
+    root or a scoped sudoers rule); still dead after that is an environment
+    prerequisite failure the caller reports and exits 1. The host nordvpn CLI
+    is not involved: the session was pre-negotiated by
+    amazon-wishlist-vpn.service as the operator user, so no credentials are
+    needed here.
+    """
+    if nordvpn.netns_egress_ok(ns):
+        return True, nordvpn.tunnel_egress_ip()
+    why = "missing" if not nordvpn.netns_exists(ns) else "present but not egressing"
+    log.warning("netns %r is %s; attempting a one-time tunnel rebuild...", ns, why)
+    if not nordvpn.rebuild_tunnel():
+        log.warning("tunnel rebuild not permitted/failed (root?); re-checking egress anyway")
+    if nordvpn.netns_egress_ok(ns):
+        return True, nordvpn.tunnel_egress_ip()
+    return False, None
+
+
 def _resolve_scope(conn, db_path: Path, args) -> list[dict]:
     """Pick this run's work set (the "scope"), for resumability.
 
@@ -171,22 +209,36 @@ def _run(args) -> int:
         if not pending:
             return 0
 
+        mode = (f"netns {args.netns} (tunnel mode)" if args.netns
+                else f"pool: {', '.join(NORDVPN_COUNTRIES)}")
         print(f"pending: {len(pending)} deals | rotate every {args.rotate_every} books "
-              f"| pool: {', '.join(NORDVPN_COUNTRIES)} | jitter {VERIFY_DELAY_MIN:g}-{VERIFY_DELAY_MAX:g}s "
+              f"| {mode} | jitter {VERIFY_DELAY_MIN:g}-{VERIFY_DELAY_MAX:g}s "
               f"| LLM: {LLM_MODEL or 'off'}")
 
-        # (1) Ensure the NordVPN tunnel is up.
-        try:
-            st = nordvpn.status()
-        except nordvpn.NordvpnError as exc:
-            print(f"nordvpn error: {exc}")
-            return 1
-        if not st.connected:
-            if args.nord_user or args.nord_pass or os.environ.get(nordvpn.ENV_USERNAME):
-                nordvpn.login(args.nord_user, args.nord_pass)
-            nordvpn.connect(NORDVPN_START_COUNTRY)
-        log.info("tunnel up via %s (ip %s)", st.country or NORDVPN_START_COUNTRY, nordvpn.ip())
-        last_rotated_ip = nordvpn.ip()
+        # (1) Ensure the VPN egress is up.
+        if args.netns:
+            # Tunnel mode: this process runs INSIDE the namespace; the host CLI
+            # (and its credentials) are unused.
+            live, last_rotated_ip = _ensure_tunnel(args.netns)
+            if not live:
+                print(f"tunnel error: namespace {args.netns!r} has no live egress and a rebuild "
+                      f"did not bring it up. Bring the tunnel up first: "
+                      f"systemctl start {WISHLIST_VPN_UNIT}")
+                return 1
+            log.info("tunnel mode: netns %s live (egress ip %s)", args.netns, last_rotated_ip or "?")
+        else:
+            # Host-CLI mode (dev boxes): the existing nordvpn CLI path.
+            try:
+                st = nordvpn.status()
+            except nordvpn.NordvpnError as exc:
+                print(f"nordvpn error: {exc}")
+                return 1
+            if not st.connected:
+                if args.nord_user or args.nord_pass or os.environ.get(nordvpn.ENV_USERNAME):
+                    nordvpn.login(args.nord_user, args.nord_pass)
+                nordvpn.connect(NORDVPN_START_COUNTRY)
+            log.info("tunnel up via %s (ip %s)", st.country or NORDVPN_START_COUNTRY, nordvpn.ip())
+            last_rotated_ip = nordvpn.ip()
 
         from playwright.sync_api import sync_playwright
 
@@ -242,17 +294,32 @@ def _run(args) -> int:
                     }
                 )
 
-                # (4) Rotate the exit IP + fingerprint every N books.
+                # (4) Refresh the exit IP + fingerprint every N books.
                 if processed % args.rotate_every == 0:
-                    try:
-                        new_ip = nordvpn.rotate()
-                    except nordvpn.NordvpnError as exc:
-                        log.warning("rotate failed (%s); continuing on the current IP", exc)
+                    if args.netns:
+                        # Tunnel mode: rebuild the tunnel for a fresh session/exit IP.
+                        # Best-effort — a not-permitted rebuild (no root) or a failed
+                        # one leaves the stable IP; the fresh fingerprint still changes
+                        # and the run continues (recorded assumption, see docstring).
+                        new_ip = nordvpn.tunnel_rotate(args.netns)
+                        if new_ip is None:
+                            log.warning("tunnel rotate not permitted/failed; continuing on the "
+                                        "current IP (fingerprint-only rotation)")
+                        else:
+                            last_rotated_ip = new_ip
+                            summary["rotations"] += 1
+                            print(f"-- rebuilt tunnel, egress IP -> {new_ip} "
+                                  f"(rotation #{summary['rotations']}); fresh fingerprint")
                     else:
-                        last_rotated_ip = new_ip
-                        summary["rotations"] += 1
-                        print(f"-- rotated exit IP -> {new_ip} "
-                              f"(rotation #{summary['rotations']}); fresh fingerprint")
+                        try:
+                            new_ip = nordvpn.rotate()
+                        except nordvpn.NordvpnError as exc:
+                            log.warning("rotate failed (%s); continuing on the current IP", exc)
+                        else:
+                            last_rotated_ip = new_ip
+                            summary["rotations"] += 1
+                            print(f"-- rotated exit IP -> {new_ip} "
+                                  f"(rotation #{summary['rotations']}); fresh fingerprint")
 
                 # (5) Pacing jitter between books (not after the last one).
                 if processed < len(pending):
@@ -296,6 +363,11 @@ def main() -> int:
                          f"(default {NORDVPN_ROTATE_EVERY}, from NORDVPN_ROTATE_EVERY).")
     ap.add_argument("--db", default=str(DEALS_DB),
                     help=f"Deals DB path (default: {DEALS_DB}).")
+    ap.add_argument("--netns", default="", metavar="NS",
+                    help="Tunnel mode: run INSIDE the given network namespace "
+                         "(e.g. 'wlvpn', via amazon-wishlist-verify.service or "
+                         "scripts/vpn_verify.sh). Empty (default) = host-CLI mode, "
+                         "where the nordvpn CLI is connected/rotated directly.")
     ap.add_argument("--nord-user", default=None,
                     help=f"Username (default: {nordvpn.ENV_USERNAME} env).")
     ap.add_argument("--nord-pass", default=None,
