@@ -213,6 +213,25 @@ BOOKBUB_OUTPUT = Path(os.environ.get("BOOKBUB_OUTPUT", BASE_DIR / "booklist.md")
 # gitignored via data/. Re-runs upsert per date; history is kept for audit.
 DEALS_DB = Path(os.environ.get("DEALS_DB", DATA_DIR / "deals.db"))
 
+# Backfill of historical daily deals (scripts/backfill_bookbub_deals.py): walk
+# [BOOKBUB_BACKFILL_END .. BOOKBUB_BACKFILL_START] day by day and store each
+# day's deals in DEALS_DB. Dates are already recorded (DEALS_DB rows or the
+# progress file) are skipped, so re-runs resume where a killed run stopped.
+BOOKBUB_BACKFILL_START = os.environ.get("BOOKBUB_BACKFILL_START", "20260826")
+BOOKBUB_BACKFILL_END = os.environ.get("BOOKBUB_BACKFILL_END", "20260613")
+# Dates per login session before a fresh login (bounds session length and the
+# number of pages one Cloudflare session has to absorb).
+BOOKBUB_BACKFILL_CHUNK = int(os.environ.get("BOOKBUB_BACKFILL_CHUNK", "5"))
+# Seconds between date navigations inside one session (jittered ±25%).
+BOOKBUB_BACKFILL_DELAY = float(os.environ.get("BOOKBUB_BACKFILL_DELAY", "3"))
+# Seconds to sleep between chunks (between login sessions); doubled when
+# Cloudflare re-challenges are detected, to let the block cool down.
+BOOKBUB_BACKFILL_BACKOFF = float(os.environ.get("BOOKBUB_BACKFILL_BACKOFF", "30"))
+# Per-date status mirror for resume (atomic writes); gitignored via data/.
+BOOKBUB_BACKFILL_PROGRESS = Path(
+    os.environ.get("BOOKBUB_BACKFILL_PROGRESS", DATA_DIR / "backfill_progress.json")
+)
+
 
 # ---------- Optional local LLM (normalisation of the parsed deal list) ----------
 
