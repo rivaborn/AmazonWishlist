@@ -2,8 +2,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, Query, Request
-from fastapi.responses import RedirectResponse
+from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 from .. import config, deals_db, services, sync
@@ -41,6 +41,16 @@ def _bookbub_sort(value: str) -> str:
 
 def _bookbub_dir(value: str) -> str:
     return "asc" if value == "asc" else "desc"
+
+
+def _bookbub_per_page(value: int) -> int:
+    """Snap an incoming per_page to the nearest allowed BookBub option.
+
+    The tab offers a fixed dropdown (BOOKBUB_PER_PAGE_OPTIONS, default
+    BOOKBUB_PER_PAGE_DEFAULT) instead of the shared 10..500 clamp the other
+    pages use.
+    """
+    return min(config.BOOKBUB_PER_PAGE_OPTIONS, key=lambda o: abs(o - value))
 
 
 def _per_page(value: int) -> int:
@@ -91,22 +101,29 @@ def bookbub_deals_page(
     direction: str = Query("desc", alias="dir"),
     show_hidden: bool = Query(False),
     page: int = Query(1, ge=1),
-    per_page: int = Query(DEFAULT_PER_PAGE),
+    per_page: int = Query(config.BOOKBUB_PER_PAGE_DEFAULT),
 ):
     """Live BookBub deals (data/deals.db, deal_status='current').
 
-    Read-only on both instances — deals.db is never synced or mutated by the
-    web app, so the mirror is safe to serve it. The tab shows only verified
-    live deals (expired/unknown/unchecked rows are filtered in the query,
-    see deals_db.current_deals). Sortable by Deal price or Date of deal via
-    `?sort=price|date` + `?dir=asc|desc` (both whitelisted, default
-    date-desc = most recent first); sorting the full list before pagination
-    keeps every page consistently ordered and the extra_query carries the
-    active sort into every page link. `?show_hidden=1` also reveals rows the
-    user has hidden (hidden rows are excluded by default).
+    Read-only on both instances: the web app never mutates deals.db, and on a
+    mirror the DB (plus its cover images) is mirrored from the primary by the
+    daily sync (GET /api/sync/deals), so the tab duplicates the primary's
+    page. The tab shows only verified live deals (expired/unknown/unchecked
+    rows are filtered in the query, see deals_db.current_deals). Sortable by
+    Deal price or Date of deal via `?sort=price|date` + `?dir=asc|desc` (both
+    whitelisted, default date-desc = most recent first); sorting the full list
+    before pagination keeps every page consistently ordered and the
+    extra_query carries the active sort into every page link.
+    `?show_hidden=1` also reveals rows the user has hidden (hidden rows are
+    excluded by default). Each row shows the captured book cover (served from
+    the local covers dir at /covers/<name>) by the title and the captured
+    Amazon description as a hover tooltip. Page size comes from the per-page
+    dropdown (BOOKBUB_PER_PAGE_OPTIONS, default 20) and is preserved across
+    pagination and sort links via `?per_page=`.
     """
     s = _bookbub_sort(sort)
     d = _bookbub_dir(direction)
+    pp = _bookbub_per_page(per_page)
     conn = deals_db.connect(config.DEALS_DB)
     try:
         deals_db.ensure_schema(conn)  # idempotent (adds verification cols if missing)
@@ -118,9 +135,9 @@ def bookbub_deals_page(
     pagination = paginate(
         rows,
         page=page,
-        per_page=_per_page(per_page),
+        per_page=pp,
         base_url="/bookbub-deals",
-        extra_query={"sort": s, "dir": d, "show_hidden": show_hidden},
+        extra_query={"sort": s, "dir": d, "show_hidden": show_hidden, "per_page": pp},
     )
     return templates.TemplateResponse(
         request,
@@ -132,10 +149,31 @@ def bookbub_deals_page(
                 "sort": s,
                 "dir": d,
                 "show_hidden": show_hidden,
+                "per_page": pp,
+                "per_page_options": config.BOOKBUB_PER_PAGE_OPTIONS,
                 "active": "bookbub",
             }
         ),
     )
+
+
+@router.get("/covers/{name}")
+def deal_cover(name: str):
+    """Serve a captured book cover from the local covers dir.
+
+    ``name`` is the bare filename stored in the deal row's ``cover`` column
+    (``<ASIN>.<ext>``). The basename check plus the resolved-path containment
+    check keep the response inside the covers dir (no path traversal); anything
+    else 404s.
+    """
+    safe = Path(name).name
+    if safe != name:
+        raise HTTPException(404, "not found")
+    covers_dir = Path(config.DEALS_COVERS_DIR).resolve()
+    path = (covers_dir / safe).resolve()
+    if not path.is_file() or covers_dir not in path.parents:
+        raise HTTPException(404, "not found")
+    return FileResponse(path)
 
 
 @router.get("/books")

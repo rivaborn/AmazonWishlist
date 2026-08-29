@@ -226,6 +226,12 @@ DEALS_DB = Path(os.environ.get("DEALS_DB", DATA_DIR / "deals.db"))
 # /covers/<name>.
 DEALS_COVERS_DIR = Path(os.environ.get("DEALS_COVERS_DIR", DATA_DIR / "covers"))
 
+# BookBub Deals tab page size: the whitelist the per-page dropdown offers and
+# its default when nothing is selected (the other pages keep the shared
+# DEFAULT_PER_PAGE).
+BOOKBUB_PER_PAGE_OPTIONS = [20, 40, 60, 80, 100]
+BOOKBUB_PER_PAGE_DEFAULT = 20
+
 # Live-deal verification (scripts/verify_deals.py): the deal_status values
 # written into the `deal` table when we check a book's current Amazon price
 # against the stored deal_price. See app.deals_db.classify_deal.

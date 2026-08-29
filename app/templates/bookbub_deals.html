@@ -8,6 +8,15 @@
            onchange="location.href = '/bookbub-deals' + (this.checked ? '?show_hidden=1' : '')">
     Show Hidden
   </label>
+  <label class="per-page">
+    Per page
+    <select id="per-page-select"
+            onchange="location.href = '/bookbub-deals?sort={{ sort }}&amp;dir={{ dir }}{% if show_hidden %}&amp;show_hidden=1{% endif %}&amp;per_page=' + this.value">
+      {% for opt in per_page_options %}
+      <option value="{{ opt }}"{% if opt == per_page %} selected{% endif %}>{{ opt }}</option>
+      {% endfor %}
+    </select>
+  </label>
 </p>
 
 {% if not rows %}
@@ -23,6 +32,7 @@
 <table>
   <thead>
     <tr>
+      <th class="cover-col"></th>
       <th class="cb-col"></th>
       <th>Title</th><th>Author</th>
       <th><a href="/bookbub-deals?sort=price&dir={{ price_next }}" class="{{ 'sort-active' if sort == 'price' }}">Deal price{% if sort == 'price' %} {{ '▲' if dir == 'asc' else '▼' }}{% endif %}</a></th>
@@ -33,8 +43,9 @@
   <tbody>
   {% for r in rows %}
     <tr>
+      <td class="cover-col">{% if r.cover %}<img class="deal-cover" src="/covers/{{ r.cover }}" alt="{{ r.title }}">{% endif %}</td>
       <td class="cb-col"><input type="checkbox" class="hide-cb" data-id="{{ r.id }}" {{ 'checked' if r.hidden else '' }} title="Hide this book from the list"></td>
-      <td><a href="{{ r.amazon_url }}" target="_blank" rel="noopener">{{ r.title }}</a></td>
+      <td><a href="{{ r.amazon_url }}" target="_blank" rel="noopener"{% if r.description %} title="{{ r.description }}"{% endif %}>{{ r.title }}</a></td>
       <td>{{ r.author or '' }}</td>
       <td>{{ r.deal_price or '—' }}</td>
       <td>{{ r.original_price or '—' }}</td>

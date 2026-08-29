@@ -67,6 +67,11 @@ td.stale { color: var(--muted); }
 .stale-badge { display: inline-block; margin-left: .4rem; padding: .05rem .35rem; border: 1px solid var(--bad);
                border-radius: 3px; color: var(--bad); font-size: .7rem; font-weight: 600; letter-spacing: .03em; }
 .cb-col { width: 28px; padding-left: .5rem; padding-right: .25rem; }
+/* BookBub Deals tab: cover thumbnail column + per-page dropdown. */
+.cover-col { width: 38px; }
+td.cover-col img.deal-cover { width: 30px; height: auto; border-radius: 2px; vertical-align: middle; }
+.per-page { white-space: nowrap; margin-left: .75rem; display: inline-flex; align-items: center; gap: .35rem; }
+.per-page select { padding: .1rem .3rem; font-size: .85rem; }
 td.cb-col input.purchased-cb { cursor: pointer; transform: scale(1.1); }
 td.cb-col input.purchased-cb:disabled { cursor: progress; }
 
