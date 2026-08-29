@@ -18,7 +18,10 @@ Amazon ASIN) this orchestrator:
 3. reads the current price (``app.amazon_price``), classifies the deal
    against the stored ``deal_price`` (``app.deals_db.classify_deal``:
    at/below = ``current``, above = ``expired``, unreadable = ``unknown``),
-   and records the outcome via ``mark_verified`` (``deal_status`` /
+   captures the book's cover image (downloaded to ``DEALS_COVERS_DIR`` as
+   ``<ASIN>.<ext>``) and description (stored on the row) for the BookBub
+   Deals tab — best-effort, a capture miss never fails the run — and
+   records the outcome via ``mark_verified`` (``deal_status`` /
    ``current_price`` / ``verified_at`` in DEALS_DB — the source of truth for
    resuming; ``data/verify_progress.json`` is an advisory telemetry mirror),
 4. every ``--rotate-every`` books (default 10) refreshes the exit IP — host
@@ -71,6 +74,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app import amazon_price, deals_db, fingerprint as fp, nordvpn  # noqa: E402
 from app.config import (  # noqa: E402
+    DEALS_COVERS_DIR,
     DEALS_DB,
     LLM_MODEL,
     NORDVPN_COUNTRIES,
@@ -138,15 +142,48 @@ def _transient(result: amazon_price.PriceResult) -> bool:
     )
 
 
+def _capture_page_meta(page, asin: str | None) -> tuple:
+    """Best-effort capture of the book cover + description for a loaded page.
+
+    Extracts the cover URL + description from the rendered HTML (pure
+    selector parse, see ``amazon_price.extract_page_meta_html``), downloads
+    the cover into ``DEALS_COVERS_DIR`` as ``<asin>.<ext>``, and returns
+    ``(cover_filename, description)`` — each ``None`` when unavailable
+    (block page, missing markup, or a failed download). Never raises: a
+    capture miss must never take the run down (the price result is what the
+    run depends on).
+    """
+    try:
+        meta = amazon_price.extract_page_meta_html(page.content())
+        cover = None
+        if meta.get("cover_url"):
+            path = amazon_price.download_cover(
+                meta["cover_url"], DEALS_COVERS_DIR, asin=asin
+            )
+            cover = path.name if path is not None else None
+        description = (meta.get("description") or "").strip() or None
+        return cover, description
+    except Exception as exc:
+        log.warning("  cover/description capture failed (best-effort): %s", exc)
+        return None, None
+
+
 def _read_with_retries(
     read, deal: dict, f: fp.Fingerprint, summary: dict
-) -> amazon_price.PriceResult:
-    """Call ``read`` for one book, retrying transient failures with backoff."""
+):
+    """Call ``read`` for one book, retrying transient failures with backoff.
+
+    ``read`` returns ``(result, cover, description)``; only the ``result``
+    drives the retry policy — the cover/description captured by the final
+    attempt are returned alongside it.
+    """
     attempts = 0
     while True:
-        result = read(deal["amazon_url"], fingerprint=f, asin=deal["asin"])
+        result, cover, description = read(
+            deal["amazon_url"], fingerprint=f, asin=deal["asin"]
+        )
         if not _transient(result) or attempts >= VERIFY_MAX_RETRIES:
-            return result
+            return result, cover, description
         attempts += 1
         summary["retries"] = summary.get("retries", 0) + 1
         log.warning(
@@ -297,7 +334,14 @@ def _run(args) -> int:
                     viewport={"width": fingerprint.width, "height": fingerprint.height},
                 )
                 try:
-                    return amazon_price.read_page(ctx.new_page(), url, asin=asin)
+                    page = ctx.new_page()
+                    result = amazon_price.read_page(page, url, asin=asin)
+                    # Best-effort capture of the cover + description (the
+                    # BookBub Deals tab shows the cover by the title and the
+                    # description on hover); never raises — a miss leaves
+                    # (None, None) and the price result is untouched.
+                    cover, description = _capture_page_meta(page, asin)
+                    return result, cover, description
                 finally:
                     ctx.close()
 
@@ -324,12 +368,18 @@ def _run(args) -> int:
                     f = fp.fresh_fingerprint(last_fp)
                 last_fp = f
 
-                result = _read_with_retries(read, deal, f, summary)
+                result, cover, description = _read_with_retries(read, deal, f, summary)
                 status, _cents = deals_db.classify_deal(deal["deal_price"], result.price_text)
                 current_price = result.price_text if status != "unknown" else None
                 deals_db.mark_verified(
                     conn, deal["id"], status=status, current_price=current_price, at=_now()
                 )
+                # Persist the captured cover/description (req 1/2). Only when
+                # something was actually captured: a blocked or unreadable
+                # read returns (None, None) and must leave the row's prior
+                # values intact (never clobber good data).
+                if cover or description:
+                    deals_db.update_cover_desc(conn, deal["id"], cover, description)
                 conn.commit()
                 summary[status] += 1
                 processed += 1

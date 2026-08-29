@@ -28,10 +28,14 @@ fallback.
 from __future__ import annotations
 
 import logging
+import os
 import re
 from dataclasses import dataclass
+from pathlib import Path
+from urllib.parse import urlsplit
 
 import httpx
+from selectolax.parser import HTMLParser
 
 from .config import (
     AMAZON_LLM_TEXT_CAP,
@@ -40,12 +44,21 @@ from .config import (
     LLM_BASE_URL,
     LLM_MODEL,
     LLM_TIMEOUT,
+    USER_AGENT,
 )
 from .deals_db import asin_from_amazon_url, parse_price_cents
 from .fingerprint import Fingerprint
 from .scraper import _BLOCK_KIND_LABEL, _classify_block_page
 
-__all__ = ["PriceResult", "read", "read_page", "LAUNCH_ARGS", "build_dp_url"]
+__all__ = [
+    "PriceResult",
+    "read",
+    "read_page",
+    "LAUNCH_ARGS",
+    "build_dp_url",
+    "extract_page_meta_html",
+    "download_cover",
+]
 
 log = logging.getLogger("amazon_price")
 
@@ -107,6 +120,118 @@ def build_dp_url(amazon_url: str | None, asin: str | None = None) -> str | None:
     """
     code = asin or (asin_from_amazon_url(amazon_url) if amazon_url else None)
     return f"https://www.amazon.com/dp/{code}" if code else None
+
+
+# --------------------------------------------------------------------------- #
+# Book cover + description capture (verification-time metadata)
+# --------------------------------------------------------------------------- #
+# Browser-like headers for the cover-image fetch. BookBub/Amazon bot
+# heuristics look at the full set, not just the UA (same convention as
+# app.scraper / app.bookbub).
+HEADERS = {
+    "User-Agent": USER_AGENT,
+    "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+}
+
+# Product-page anchors for the book's cover image and the description block.
+# Co-located so an Amazon markup change is a one-place fix (same convention as
+# the price containers above).
+COVER_SELECTORS = ("#landingImage", "#imgBlkFront")
+DESCRIPTION_SELECTORS = ("#bookDescription_feature_div", "#productDescription")
+
+# Image extensions accepted when deriving the cover filename; anything else
+# falls back to .jpg (Amazon serves the cover as JPEG by default).
+_IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".webp", ".gif")
+
+
+def _collapse_ws(text: str | None) -> str:
+    """Collapse runs of whitespace to single spaces (tooltip-friendly)."""
+    return re.sub(r"\s+", " ", text or "").strip()
+
+
+def _cover_ext(url: str) -> str:
+    """The image extension from the URL path, else ``.jpg``."""
+    base = os.path.basename(urlsplit(url).path)
+    ext = os.path.splitext(base)[1].lower()
+    return ext if ext in _IMAGE_EXTS else ".jpg"
+
+
+def extract_page_meta_html(html: str) -> dict:
+    """Parse the book cover URL + description text out of a rendered Amazon
+    product page (pure — offline-testable against a canned HTML string).
+
+    Best-effort: never raises; returns ``{"cover_url": str, "description":
+    str}`` with empty strings when either is absent. The cover prefers the
+    ``data-old-hires`` attribute (full-resolution source) over ``src``.
+    """
+    try:
+        tree = HTMLParser(html or "")
+    except Exception:
+        return {"cover_url": "", "description": ""}
+
+    cover_url = ""
+    for sel in COVER_SELECTORS:
+        node = tree.css_first(sel)
+        if node is None:
+            continue
+        attrs = node.attributes or {}
+        cover_url = (attrs.get("data-old-hires") or attrs.get("src") or "").strip()
+        if cover_url:
+            break
+
+    description = ""
+    for sel in DESCRIPTION_SELECTORS:
+        node = tree.css_first(sel)
+        if node is not None:
+            description = _collapse_ws(node.text(strip=True))
+            if description:
+                break
+
+    return {"cover_url": cover_url, "description": description}
+
+
+def download_cover(
+    url: str,
+    dest: str | Path,
+    asin: str | None = None,
+    fetcher=None,
+) -> Path | None:
+    """Download a cover image into directory ``dest`` and return its Path.
+
+    ``dest`` is the covers directory (created when missing). The filename is
+    ``<asin>.<ext>`` when ``asin`` is given (one file per book, matching the
+    deal row's ``asin``), else a sanitised URL basename; ``<ext>`` is derived
+    from the URL path (``.jpg`` default). ``fetcher`` is an injectable
+    ``url -> bytes`` callable (used by tests); when ``None`` an httpx client
+    does the GET (lazy import, browser-like headers). Best-effort: never
+    raises — logs and returns ``None`` on any failure so a cover miss can
+    never take a verification run down.
+    """
+    try:
+        dest = Path(dest)
+        dest.mkdir(parents=True, exist_ok=True)
+        if asin:
+            name = f"{asin}{_cover_ext(url)}"
+        else:
+            base = os.path.basename(urlsplit(url).path) or "cover"
+            name = re.sub(r"[^A-Za-z0-9._-]+", "_", base)[:80] or "cover"
+        if fetcher is None:
+            with httpx.Client(headers=HEADERS, timeout=30) as client:
+                resp = client.get(url)
+                resp.raise_for_status()
+                data = resp.content
+        else:
+            data = fetcher(url)
+        if not data:
+            log.warning("cover download: empty response for %s", url)
+            return None
+        path = dest / name
+        path.write_bytes(data)
+        return path
+    except Exception as exc:
+        log.warning("cover download failed (%s): %s", url, exc)
+        return None
 
 
 def _save_diagnostic(label: str, url: str, body: str):

@@ -220,6 +220,12 @@ BOOKBUB_OUTPUT = Path(os.environ.get("BOOKBUB_OUTPUT", BASE_DIR / "booklist.md")
 # gitignored via data/. Re-runs upsert per date; history is kept for audit.
 DEALS_DB = Path(os.environ.get("DEALS_DB", DATA_DIR / "deals.db"))
 
+# Book cover images captured during live verification (scripts/verify_deals.py,
+# which the daily updater invokes): one file per book named <ASIN>.<ext>,
+# stored locally under data/ (gitignored) and served by the web app at
+# /covers/<name>.
+DEALS_COVERS_DIR = Path(os.environ.get("DEALS_COVERS_DIR", DATA_DIR / "covers"))
+
 # Live-deal verification (scripts/verify_deals.py): the deal_status values
 # written into the `deal` table when we check a book's current Amazon price
 # against the stored deal_price. See app.deals_db.classify_deal.
