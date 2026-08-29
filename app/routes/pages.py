@@ -35,6 +35,14 @@ def _basis(value: str) -> str:
     return "list" if value == "list" else "prev"
 
 
+def _bookbub_sort(value: str) -> str:
+    return "price" if value == "price" else "date"
+
+
+def _bookbub_dir(value: str) -> str:
+    return "asc" if value == "asc" else "desc"
+
+
 def _per_page(value: int) -> int:
     return max(PER_PAGE_MIN, min(PER_PAGE_MAX, value))
 
@@ -79,6 +87,8 @@ def deals_page(
 @router.get("/bookbub-deals")
 def bookbub_deals_page(
     request: Request,
+    sort: str = Query("date", alias="sort"),
+    direction: str = Query("desc", alias="dir"),
     page: int = Query(1, ge=1),
     per_page: int = Query(DEFAULT_PER_PAGE),
 ):
@@ -87,16 +97,26 @@ def bookbub_deals_page(
     Read-only on both instances — deals.db is never synced or mutated by the
     web app, so the mirror is safe to serve it. The tab shows only verified
     live deals (expired/unknown/unchecked rows are filtered in the query,
-    see deals_db.current_deals).
+    see deals_db.current_deals). Sortable by Deal price or Date of deal via
+    `?sort=price|date` + `?dir=asc|desc` (both whitelisted, default
+    date-desc = most recent first); sorting the full list before pagination
+    keeps every page consistently ordered and the extra_query carries the
+    active sort into every page link.
     """
+    s = _bookbub_sort(sort)
+    d = _bookbub_dir(direction)
     conn = deals_db.connect(config.DEALS_DB)
     try:
         deals_db.ensure_schema(conn)  # idempotent (adds verification cols if missing)
-        rows = deals_db.current_deals(conn)
+        rows = deals_db.sort_deals(deals_db.current_deals(conn), sort=s, direction=d)
     finally:
         conn.close()
     pagination = paginate(
-        rows, page=page, per_page=_per_page(per_page), base_url="/bookbub-deals"
+        rows,
+        page=page,
+        per_page=_per_page(per_page),
+        base_url="/bookbub-deals",
+        extra_query={"sort": s, "dir": d},
     )
     return templates.TemplateResponse(
         request,
@@ -105,6 +125,8 @@ def bookbub_deals_page(
             {
                 "rows": pagination["rows"],
                 "pagination": pagination,
+                "sort": s,
+                "dir": d,
                 "active": "bookbub",
             }
         ),
