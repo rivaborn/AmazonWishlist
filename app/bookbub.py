@@ -11,9 +11,15 @@ auth-wall or zero deals, falls back to Chromium driven by Playwright, which
 executes the challenge JS, keeps the login cookies the outbound link set, and
 renders the deal cards.
 
+Login is primarily a BookBub account login (``BOOKBUB_USERNAME`` /
+``BOOKBUB_PASSWORD``, set in the environment — never committed). The signed
+outbound link from the daily email is still accepted as a fallback so
+ad-hoc/probe runs work without credentials.
+
 Flow (mirrors the httpx<->playwright fallback used elsewhere in this app):
 
-  1. Follow the outbound link — it logs the visitor in and lands on the
+  1. Log in — either via the account login form (credentials) or by following
+     the outbound link, which auto-logs the visitor in and lands on the
      daily-deals page (the link itself carries the target ``?date=``).
   2. Navigate (same session) to ``/ebook-deals/daily-deals?date=YYYYMMDD``.
   3. Parse each deal card: title, author(s), deal price, book URL, and the
@@ -37,6 +43,8 @@ from .config import (
     BOOKBUB_DAILY_DEALS_BASE,
     BOOKBUB_DATE_FORMAT,
     BOOKBUB_LOGIN_LINK,
+    BOOKBUB_PASSWORD,
+    BOOKBUB_USERNAME,
     USER_AGENT,
 )
 
@@ -71,6 +79,16 @@ ORIGINAL_PRICE = ".deal-price .original-price"
 # href is `.../promotion_site_active_check/{id}?promotion_type=deals&retailer_id=1`
 # and which 302-redirects (a plain GET) to the Amazon Kindle product page.
 AMAZON_RETAILER_HREF_MARK = "retailer_id=1"
+
+# ---- Account-login selectors (validated once against the live login page) --
+# BookBub's account login lives at /login with a standard email + password
+# form. If BookBub's markup drifts, adjust the selectors HERE (one place) and
+# the daily updater + probe inherit the fix automatically — same convention as
+# the deal-card selectors above.
+LOGIN_URL = f"{_BASE}/login"
+LOGIN_EMAIL_SEL = "input[type='email']"
+LOGIN_PASSWORD_SEL = "input[type='password']"
+LOGIN_SUBMIT_SEL = "input[type='submit'], button[type='submit']"
 
 
 class BookbubError(RuntimeError):
@@ -259,15 +277,50 @@ def _load_deals(page) -> None:
     time.sleep(2)
 
 
-def fetch_daily_deals_playwright(link: str, date: str, headless: bool = True) -> list[Deal]:
-    """Log in via the outbound link and read the daily-deals page in Chromium.
+def _login(page, username: str, password: str) -> None:
+    """Log into BookBub with account credentials on an open page.
 
-    The outbound link auto-logs the visitor in and lands directly on the
-    daily-deals page for *the link's own date*. If that is the requested date
-    we parse it as-is — a redundant reload of the same URL re-triggers the
-    Cloudflare managed challenge and is flaky. We only navigate again when the
-    requested date differs from the landing date.
+    Best-effort: it navigates to the login page, clears the Cloudflare
+    challenge, fills the email + password fields and submits, then clears the
+    challenge again on the resulting page (a page that already reads
+    non-challenged returns immediately). If the credentials are wrong BookBub
+    just re-serves the login form — the subsequent daily-deals navigation will
+    then find no deals and the caller surfaces a clean error.
     """
+    page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=60_000)
+    _wait_past_challenge(page)
+    page.wait_for_selector(LOGIN_EMAIL_SEL, timeout=20_000)
+    page.fill(LOGIN_EMAIL_SEL, username)
+    page.fill(LOGIN_PASSWORD_SEL, password)
+    page.click(LOGIN_SUBMIT_SEL)
+    _wait_past_challenge(page)
+
+
+def fetch_daily_deals_playwright(
+    date: str,
+    link: str | None = None,
+    *,
+    username: str | None = None,
+    password: str | None = None,
+    headless: bool = True,
+) -> list[Deal]:
+    """Log in and read the daily-deals page in Chromium.
+
+    Login is via account credentials (``username``/``password``) when both are
+    given, otherwise via the outbound ``link`` (which auto-logs the visitor in
+    and lands directly on the daily-deals page for *the link's own date*). In
+    the link case, if that landing page is already the requested date we parse
+    it as-is — a redundant reload of the same URL re-triggers the Cloudflare
+    managed challenge and is flaky. Credential login lands on the site, so the
+    requested date is always navigated to explicitly. Raises
+    :class:`BookbubError` when neither credentials nor a link are available.
+    """
+    creds = bool(username and password)
+    if not creds and not link:
+        raise BookbubError(
+            "no BookBub login configured: set BOOKBUB_USERNAME/BOOKBUB_PASSWORD "
+            "(or pass --link for the daily email's outbound link)"
+        )
     from playwright.sync_api import sync_playwright  # lazy: optional dependency
 
     with sync_playwright() as pw:
@@ -279,16 +332,20 @@ def fetch_daily_deals_playwright(link: str, date: str, headless: bool = True) ->
                 locale="en-US",
             )
             page = ctx.new_page()
-            # 1. Outbound link: auto-login + clears the Cloudflare challenge,
-            #    landing on the daily-deals page (for the link's date).
-            page.goto(link, wait_until="domcontentloaded", timeout=60_000)
-            _load_deals(page)
-            if _on_daily_deals_for_date(page, date):
-                html = page.content()
+            # 1. Login: account credentials, or the outbound link (auto-login +
+            #    clears the Cloudflare challenge, landing on the daily-deals
+            #    page for the link's date).
+            if creds:
+                _login(page, username, password)
             else:
+                page.goto(link, wait_until="domcontentloaded", timeout=60_000)
+                _load_deals(page)
+            if creds or not _on_daily_deals_for_date(page, date):
                 # 2. Same session, navigate to the requested day.
                 page.goto(_deals_url(date), wait_until="domcontentloaded", timeout=60_000)
                 _load_deals(page)
+                html = page.content()
+            else:
                 html = page.content()
         finally:
             browser.close()
@@ -300,21 +357,29 @@ def _is_challenged(page) -> bool:
     return "just a moment" in (page.title() or "").lower()
 
 
-def fetch_daily_deals_many(dates: list[str], link: str | None = None, headless: bool = True,
-                           inter_date_delay: float = 0.0,
-                           challenged: set[str] | None = None) -> dict[str, list[Deal]]:
+def fetch_daily_deals_many(
+    dates: list[str],
+    link: str | None = None,
+    *,
+    username: str | None = None,
+    password: str | None = None,
+    headless: bool = True,
+    inter_date_delay: float = 0.0,
+    challenged: set[str] | None = None,
+) -> dict[str, list[Deal]]:
     """Fetch several daily-deals pages in ONE logged-in browser session.
 
-    Logs in once via the outbound ``link`` (clearing the Cloudflare managed
-    challenge), then navigates to ``?date=YYYYMMDD`` for each date in
-    ``dates`` (in order) on the same session — reusing the login instead of
-    paying the login+challenge cost per date.
+    Logs in once — via account credentials (``username``/``password``) when
+    both are given, otherwise via the outbound ``link`` (clearing the
+    Cloudflare managed challenge) — then navigates to ``?date=YYYYMMDD`` for
+    each date in ``dates`` (in order) on the same session, reusing the login
+    instead of paying the login+challenge cost per date.
 
     Every date is best-effort: a date whose page re-challenges or carries no
     deal cards yields an *empty list* for that date (recorded, never an
     abort). Two hard aborts:
 
-    * ``BookbubError`` if no ``link`` is available, and
+    * ``BookbubError`` if neither credentials nor a ``link`` are available, and
     * ``BookbubError`` if the login page never clears the challenge (a dead /
       stale session — no point continuing with one).
 
@@ -325,9 +390,15 @@ def fetch_daily_deals_many(dates: list[str], link: str | None = None, headless: 
 
     Returns ``{date: [Deal, ...]}`` with every input date as a key.
     """
-    link = link or BOOKBUB_LOGIN_LINK
-    if not link:
-        raise BookbubError("no BookBub login link: pass --link or set BOOKBUB_LOGIN_LINK")
+    username = username or BOOKBUB_USERNAME
+    password = password or BOOKBUB_PASSWORD
+    creds = bool(username and password)
+    link = link if link else (None if creds else BOOKBUB_LOGIN_LINK)
+    if not creds and not link:
+        raise BookbubError(
+            "no BookBub login configured: set BOOKBUB_USERNAME/BOOKBUB_PASSWORD "
+            "(or pass --link for the daily email's outbound link)"
+        )
     if not dates:
         return {}
     if challenged is None:
@@ -345,14 +416,19 @@ def fetch_daily_deals_many(dates: list[str], link: str | None = None, headless: 
                 locale="en-US",
             )
             page = ctx.new_page()
-            # 1. Outbound link: auto-login + clears the Cloudflare challenge,
-            #    landing on the daily-deals page (for the link's own date).
-            page.goto(link, wait_until="domcontentloaded", timeout=60_000)
-            _load_deals(page)
+            # 1. Login: account credentials, or the outbound link (auto-login
+            #    + clears the Cloudflare challenge, landing on the daily-deals
+            #    page for the link's own date).
+            if creds:
+                _login(page, username, password)
+            else:
+                page.goto(link, wait_until="domcontentloaded", timeout=60_000)
+                _load_deals(page)
             if _is_challenged(page):
                 raise BookbubError(
-                    "Cloudflare challenge never cleared after the outbound-link login — "
-                    "the link may be stale/expired, or Cloudflare is hard-blocking the browser"
+                    "Cloudflare challenge never cleared after the BookBub login — "
+                    "the credentials/link may be wrong or stale, or Cloudflare is "
+                    "hard-blocking the browser"
                 )
 
             for i, date in enumerate(dates):
@@ -417,24 +493,43 @@ def resolve_amazon_urls(deals: list[Deal], *, timeout: float = 30.0) -> list[Dea
 # --------------------------------------------------------------------------- #
 # Public entry point
 # --------------------------------------------------------------------------- #
-def fetch_daily_deals(date: str, link: str | None = None, headless: bool | None = None) -> list[Deal]:
+def fetch_daily_deals(
+    date: str,
+    link: str | None = None,
+    *,
+    username: str | None = None,
+    password: str | None = None,
+    headless: bool | None = None,
+) -> list[Deal]:
     """Fetch the day's deals, falling back from httpx to Playwright.
 
-    ``link`` defaults to ``BOOKBUB_LOGIN_LINK`` (the daily email's outbound
-    link). ``headless`` pins the browser mode; when ``None`` headless is tried
-    first and headful as a retry (headful clears Cloudflare more reliably).
+    Login is via account credentials when both ``username`` and ``password``
+    are given (or set via ``BOOKBUB_USERNAME``/``BOOKBUB_PASSWORD``); the
+    outbound ``link`` (defaulting to ``BOOKBUB_LOGIN_LINK``) is used only when
+    no credentials are configured. ``headless`` pins the browser mode; when
+    ``None`` headless is tried first and headful as a retry (headful clears
+    Cloudflare more reliably). Raises :class:`BookbubError` when neither
+    credentials nor a link are available.
     """
+    username = username or BOOKBUB_USERNAME
+    password = password or BOOKBUB_PASSWORD
+    creds = bool(username and password)
     link = link or BOOKBUB_LOGIN_LINK
-    if not link:
-        raise BookbubError("no BookBub login link: pass --link or set BOOKBUB_LOGIN_LINK")
+    if not creds and not link:
+        raise BookbubError(
+            "no BookBub login configured: set BOOKBUB_USERNAME/BOOKBUB_PASSWORD "
+            "(or pass --link for the daily email's outbound link)"
+        )
 
     deals: list[Deal] = []
 
-    # Fast path — only useful if Cloudflare isn't interstitial-ing us.
-    try:
-        deals = fetch_daily_deals_httpx(link, date)
-    except BookbubError:
-        deals = []
+    # Fast path — only useful if Cloudflare isn't interstitial-ing us, and
+    # only for the link (httpx can't perform the account login form).
+    if not creds:
+        try:
+            deals = fetch_daily_deals_httpx(link, date)
+        except BookbubError:
+            deals = []
 
     # Browser fallback — the path that actually clears Cloudflare.
     if not deals:
@@ -442,7 +537,9 @@ def fetch_daily_deals(date: str, link: str | None = None, headless: bool | None 
         last_err: Exception | None = None
         for mode in modes:
             try:
-                deals = fetch_daily_deals_playwright(link, date, headless=mode)
+                deals = fetch_daily_deals_playwright(
+                    date, link=link, username=username, password=password, headless=mode
+                )
             except Exception as e:  # noqa: BLE001 - surface a clean error below
                 last_err = e
                 continue
@@ -454,7 +551,8 @@ def fetch_daily_deals(date: str, link: str | None = None, headless: bool | None 
                 f"{'both headless and headful' if len(modes) > 1 else f'browser (headless={modes[0]})'} "
                 f"all returned nothing"
                 + (f"; last error: {last_err}" if last_err else "")
-                + " — the outbound link may be stale/expired or Cloudflare may have challenged the browser)"
+                + " — the credentials/outbound link may be stale/expired, or Cloudflare may "
+                + "have challenged the browser"
             )
 
     return resolve_amazon_urls(deals)
@@ -476,6 +574,10 @@ def _normalise_date(raw: str | None) -> str:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Probe BookBub daily deals (login + fetch + parse).")
     parser.add_argument("--link", default=None, help="Outbound auto-login link from the daily email.")
+    parser.add_argument("--username", default=None,
+                        help="BookBub account email (default: BOOKBUB_USERNAME).")
+    parser.add_argument("--password", default=None,
+                        help="BookBub account password (default: BOOKBUB_PASSWORD).")
     parser.add_argument("--date", default=None, help="Day to fetch, YYYYMMDD (default: today).")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--headless", dest="headless", action="store_true", default=None,
@@ -487,7 +589,13 @@ def main(argv: list[str] | None = None) -> int:
     link = args.link or BOOKBUB_LOGIN_LINK
     date = _normalise_date(args.date)
     try:
-        deals = fetch_daily_deals(date, link=link, headless=args.headless)
+        deals = fetch_daily_deals(
+            date,
+            link=link,
+            username=args.username or BOOKBUB_USERNAME or None,
+            password=args.password or BOOKBUB_PASSWORD or None,
+            headless=args.headless,
+        )
     except BookbubError as e:
         print(f"BOOKBUB PROBE FAILED: {e}", file=sys.stderr)
         return 1
