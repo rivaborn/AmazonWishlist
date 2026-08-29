@@ -385,7 +385,7 @@ Read at run time by `scripts/build_grimmory_db.py` / `app/grimmory.py`. The pass
 
 ## BookBub daily ebook deals (booklist.md + data/deals.db)
 
-A one-off pull of the daily [BookBub](https://www.bookbub.com) ebook-deal list, keyed off the **outbound link in the daily BookBub email**. That link is a signed, single-use auto-login: following it logs you into bookbub.com and lands on that day's daily-deals page. The deals themselves are served from `https://www.bookbub.com/ebook-deals/daily-deals?date=YYYYMMDD`, and any date can be opened in the same logged-in session.
+A one-off pull of the daily [BookBub](https://www.bookbub.com) ebook-deal list. Login is primarily the **BookBub account** — `BOOKBUB_USERNAME` / `BOOKBUB_PASSWORD` from the environment (real secrets, **never committed to the repo**; see Configuration) — which Chromium fills into the `bookbub.com/login` form. The signed **outbound link in the daily BookBub email** remains as an ad-hoc auto-login for one-off runs and the probe (`--link`), used only when no account credentials are configured: following it logs you into bookbub.com and lands on that day's daily-deals page. The deals themselves are served from `https://www.bookbub.com/ebook-deals/daily-deals?date=YYYYMMDD`, and any date can be opened in the same logged-in session.
 
 BookBub sits behind a Cloudflare “Just a moment…” managed challenge, so a plain HTTP client is stopped at the interstitial. `app/bookbub.py` tries a lightweight httpx path first and, when that is interstitial-ed (the current case), falls back to Chromium driven by Playwright (headless, then headful as a retry) which executes the challenge and parses the deal cards.
 
@@ -402,10 +402,10 @@ python scripts/build_bookbub_deals.py --link '<outbound link from the daily emai
 
 The script fetches the deals, stores them in the deals database (see below), then writes the report atomically (tmp + replace), so a failed run never leaves a half-written file. Exit codes: `0` written, `1` fetch/parse error, an empty day, or a deals-DB write failure, `2` missing `--link`.
 
-A quick probe that prints the day's deals without writing the file (also supports `--headless`/`--headful` if Cloudflare keeps challenging headless):
+A quick probe that prints the day's deals without writing the file (also supports `--headless`/`--headful` if Cloudflare keeps challenging headless). It uses the account credentials from the environment by default; `--link '<outbound link>'` is the ad-hoc alternative when they are not set:
 
 ```bash
-python -m app.bookbub --link '<outbound link>' [--date YYYYMMDD]
+python -m app.bookbub [--username U --password P] [--link '<outbound link>'] [--date YYYYMMDD]
 ```
 
 ### Output
@@ -489,22 +489,22 @@ The NordVPN account is read **only** from the `NORDVPN_USERNAME` / `NORDVPN_PASS
 `scripts/bookbub_daily.py` runs the whole daily cycle in one pass:
 
 ```bash
-python scripts/bookbub_daily.py --check                       # dry run: date, link status, recheckable count
-python scripts/bookbub_daily.py [--date YYYYMMDD] [--link L]  # manual run (dev box)
+python scripts/bookbub_daily.py --check                                                    # dry run: date, credential status, recheckable count
+BOOKBUB_USERNAME='...' BOOKBUB_PASSWORD='...' python scripts/bookbub_daily.py [--date YYYYMMDD]  # manual run (dev box)
 # Ubuntu: runs automatically via the systemd units below; manually:
 #   systemctl start amazon-wishlist-bookbub.service
 #   journalctl -u amazon-wishlist-bookbub -f
 ```
 
-1. **Fetch + store** — pulls the day's BookBub daily deals (`bookbub.fetch_daily_deals`: login via the daily email's outbound link, Playwright clears the Cloudflare challenge) and upserts them into `data/deals.db` via `deals_db.store_deals` — idempotent per date, computes `owned_in_grimmory` from `data/grimmory.db` (books you own never show on the tab) and sets `no_amazon_link`.
+1. **Fetch + store** — pulls the day's BookBub daily deals (`bookbub.fetch_daily_deals`: logs into the BookBub account with `BOOKBUB_USERNAME` / `BOOKBUB_PASSWORD`; Playwright clears the Cloudflare challenge) and upserts them into `data/deals.db` via `deals_db.store_deals` — idempotent per date, computes `owned_in_grimmory` from `data/grimmory.db` (books you own never show on the tab) and sets `no_amazon_link`.
 2. **Re-verify** — then runs `scripts/verify_deals.py --recheck` (the tunnel/fingerprint/pacing loop above) over every deal that is **not yet** `expired` — i.e. `current`, `unknown`, and unchecked — re-reading each against its live Amazon price. `expired` is terminal and is **never re-checked**; deals that come back `current` flow into the BookBub Deals tab automatically.
 
-**Scheduling (Ubuntu)**: `amazon-wishlist-bookbub.timer` fires `amazon-wishlist-bookbub.service` at **18:00 local time** daily (`OnCalendar=*-*-* 18:00:00`, `Persistent=true` so a missed run fires on next boot). The service runs the updater **inside the `wlvpn` tunnel namespace** (`BindsTo=amazon-wishlist-vpn.service`), so the re-verify's Amazon reads egress only through NordVPN — the same fail-closed guarantee as the one-shot verify unit. `install_systemd.sh` installs and enables the timer on every deploy and best-effort starts the service once (a missing login link must never block a deploy).
+**Scheduling (Ubuntu)**: `amazon-wishlist-bookbub.timer` fires `amazon-wishlist-bookbub.service` at **18:00 local time** daily (`OnCalendar=*-*-* 18:00:00`, `Persistent=true` so a missed run fires on next boot). The service runs the updater **inside the `wlvpn` tunnel namespace** (`BindsTo=amazon-wishlist-vpn.service`), so the re-verify's Amazon reads egress only through NordVPN — the same fail-closed guarantee as the one-shot verify unit. `install_systemd.sh` installs and enables the timer on every deploy and best-effort starts the service once (missing credentials must never block a deploy).
 
 **Prerequisites**:
-- `BOOKBUB_LOGIN_LINK` in `/etc/default/amazon-wishlist` — the outbound link from the daily BookBub email (a per-day rotating token). A **missing** link exits the run **2** with a clear message (nothing fetched, DB untouched); a **stale/expired** link fails the fetch (logged, exit 1) but the re-verify step still runs. The operator refreshes the link when BookBub rotates it.
+- `BOOKBUB_USERNAME` / `BOOKBUB_PASSWORD` in `/etc/default/amazon-wishlist` — the BookBub account, read from the environment and **never committed to the repo** (same rule as `GRIMMORY_USERNAME` / `GRIMMORY_PASSWORD`). **Missing** credentials exit the run **2** with a clear message (nothing fetched, DB untouched); **wrong/expired** credentials fail the fetch (logged, exit 1) but the re-verify step still runs. Rotate the account password if it is ever exposed.
 - `data/grimmory.db` (`GRIMMORY_DB`) must be present for owned detection; without it, `owned_in_grimmory` stays NULL (unavailable) and those deals still show.
-- `--check` is a dry run: it prints the date, the login-link status, and the recheckable (non-expired) deal count read straight from the DB — no network, browser, or tunnel.
+- `--check` is a dry run: it prints the date, the credential status (`credentials: set` / `no BOOKBUB_USERNAME / BOOKBUB_PASSWORD configured` — never the values), and the recheckable (non-expired) deal count read straight from the DB — no network, browser, or tunnel.
 
 ### The wlvpn NordVPN tunnel (Ubuntu deployment)
 
@@ -519,11 +519,13 @@ On the Ubuntu box the verifier does **not** use the host-wide `nordvpn connect`:
 
 ### Configuration (env vars)
 
-The session link is never committed (it is a rotating signed token), and neither are the NordVPN credentials. The `BOOKBUB_*` / `LLM_*` / `NORDVPN_*` / `VERIFY_*` / `WISHLIST_VPN_*` settings in `app/config.py` (the `WISHLIST_VPN_USER` / `WISHLIST_VPN_LAN_SUBNET` / `WISHLIST_VPN_DNS` tunnel knobs are read by the tunnel scripts from `/etc/default/amazon-wishlist`):
+The BookBub credentials and session link are never committed (the credentials are real secrets; the link is a rotating signed token), and neither are the NordVPN credentials. The `BOOKBUB_*` / `LLM_*` / `NORDVPN_*` / `VERIFY_*` / `WISHLIST_VPN_*` settings in `app/config.py` (the `WISHLIST_VPN_USER` / `WISHLIST_VPN_LAN_SUBNET` / `WISHLIST_VPN_DNS` tunnel knobs are read by the tunnel scripts from `/etc/default/amazon-wishlist`):
 
 | var | default | meaning |
 | --- | --- | --- |
-| `BOOKBUB_LOGIN_LINK` | *(unset)* | The outbound auto-login link from the email. Supplied per run via `--link` or this var. |
+| `BOOKBUB_USERNAME` | *(unset)* | BookBub account email — primary login for the daily updater and probe. A real secret: supplied via env (`/etc/default/amazon-wishlist` on the host), **never committed**. |
+| `BOOKBUB_PASSWORD` | *(unset)* | BookBub account password — same rules as `BOOKBUB_USERNAME`; rotate it if it is ever exposed. |
+| `BOOKBUB_LOGIN_LINK` | *(unset)* | Optional ad-hoc login: the outbound auto-login link from the email. Used only when the account credentials are not configured, via `--link` or this var (one-shot builder / probe). |
 | `BOOKBUB_DAILY_DEALS_BASE` | `https://www.bookbub.com/ebook-deals/daily-deals` | Daily-deals page; the day is the `?date=YYYYMMDD` query arg. |
 | `BOOKBUB_DATE_FORMAT` | `%Y%m%d` | strftime format of the `?date=` value. |
 | `BOOKBUB_OUTPUT` | `booklist.md` (repo root) | Where the report is written. |
