@@ -4,9 +4,14 @@
 # as amazon-wishlist-verify.service (the BookBub fetch itself also routes
 # through the tunnel, which is harmless).
 #
-# amazon-wishlist-vpn.service owns the namespace (BindsTo=). Triggered daily
-# at 18:00 local by amazon-wishlist-bookbub.timer, or on demand:
-#   systemctl start amazon-wishlist-bookbub.service
+# amazon-wishlist-vpn.service owns the namespace (Requires= / BindsTo=), so
+# starting this unit brings the tunnel up, and the ExecStopPost below tears it
+# down when the run is done — the VPN is only connected while the daily run is
+# in use. Triggered by the APP's scheduler (app/scheduler.py, at the BookBub
+# time set in the Settings tab), which runs:
+#   sudo -n systemctl start amazon-wishlist-bookbub.service
+# via the scoped sudoers rule scripts/install_systemd.sh provisions. The old
+# amazon-wishlist-bookbub.timer (18:00) is retired — the app schedules the run.
 # Follow progress: journalctl -u amazon-wishlist-bookbub -f
 #
 # What one run does:
@@ -55,8 +60,14 @@ Environment="PLAYWRIGHT_HOST_PLATFORM_OVERRIDE=ubuntu24.04-x64"
 # defaults needs no such file.
 EnvironmentFile=-/etc/default/amazon-wishlist
 ExecStart=/opt/amazon-wishlist/.venv/bin/python scripts/bookbub_daily.py --netns wlvpn
-Restart=on-failure
-RestartSec=30
+# Teardown after EVERY run (success, failure, or crash): the VPN is in use only
+# while the daily cycle is running ("when not in use, the VPN should not be
+# connected"). ExecStopPost runs as the service user, hence the scoped sudoers
+# rule (install_systemd.sh provisions it).
+ExecStopPost=/usr/bin/sudo -n /usr/bin/systemctl stop amazon-wishlist-vpn.service
+# One run per trigger, NO Restart=: the app's once-a-day schedule is the retry.
+# A failing run must die (and let the VPN down) instead of flapping the tunnel
+# on a 30 s restart loop all day.
 # Hardening (mirrors amazon-wishlist.service: chromium's multi-process model —
 # zygote / crashpad / shared /tmp sockets — breaks under stricter settings;
 # see the NOTE in that unit).

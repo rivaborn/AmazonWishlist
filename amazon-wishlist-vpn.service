@@ -1,10 +1,14 @@
 # Per-process NordVPN egress for the Amazon Wishlist live-deal verifier.
 #
-# Brings up the `wlvpn` network namespace with a NordLynx (WireGuard) tunnel at
-# boot, so ONLY processes placed in that namespace (scripts/verify_deals.py,
-# run via amazon-wishlist-verify.service / scripts/vpn_verify.sh) egress through
-# NordVPN; the rest of the box (SSH, LAN, the wishlist scraper itself) keeps its
-# normal connection.
+# Brings up the `wlvpn` network namespace with a NordLynx (WireGuard) tunnel
+# ON DEMAND — not at boot: this unit has no [Install] section, so it is
+# started only when a consumer needs it (the daily BookBub run's Requires=,
+# or the ad-hoc verify wrapper) and torn down when the run is done (the
+# bookbub unit's ExecStopPost) — the VPN is only connected while it is in use.
+# So ONLY processes placed in that namespace (scripts/verify_deals.py, run via
+# amazon-wishlist-bookbub.service / amazon-wishlist-verify.service /
+# scripts/vpn_verify.sh) egress through NordVPN; the rest of the box (SSH, LAN,
+# the wishlist scraper itself) keeps its normal connection.
 #
 # Type=oneshot + RemainAfterExit so the namespace persists as a dependency
 # target for the consumer units. scripts/vpn_netns_up.sh is idempotent (it
@@ -46,14 +50,16 @@ EnvironmentFile=-/etc/default/amazon-wishlist
 ExecStart=/bin/bash /opt/amazon-wishlist/scripts/vpn_netns_up.sh
 ExecStop=/bin/bash /opt/amazon-wishlist/scripts/vpn_netns_down.sh
 # Verified on systemd 255: Restart= IS honoured for Type=oneshot, contrary to
-# the common belief that it is ignored. Five attempts, 20 s apart, covers a boot
-# race that resolves in seconds; a genuinely broken nordvpnd still gives up
+# the common belief that it is ignored. Five attempts, 20 s apart, covers a
+# boot race that resolves in seconds; a genuinely broken nordvpnd still gives up
 # rather than looping forever.
 Restart=on-failure
 RestartSec=20
 # The up script waits up to 20 s for the nordlynx iface, then connect + harvest
 # + rebuild + a 15 s egress curl; 180 s is a generous ceiling.
 TimeoutStartSec=180
-
-[Install]
-WantedBy=multi-user.target
+# No [Install] section on purpose: the tunnel must NOT be enabled/started at
+# boot (req: "when not in use, the VPN should not be connected"). Consumers
+# start it on demand (amazon-wishlist-bookbub.service's Requires=) and tear it
+# down after (that unit's ExecStopPost). scripts/install_systemd.sh also
+# `systemctl disable`s it in case a previous install enabled it.

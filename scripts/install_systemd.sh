@@ -102,31 +102,43 @@ fi
 rm -f /tmp/nordvpn.deb
 
 install -m 644 "$APP_DIR/amazon-wishlist.service" /etc/systemd/system/amazon-wishlist.service
-# The wlvpn tunnel unit: persists the namespace at boot so the live-deal
-# verifier can run inside it. Its start is best-effort — until the operator has
-# run `nordvpn login --token` it cannot come up, and that must never block a
-# deploy (the up script also exits 1 with a clear message when its
-# prerequisites are missing; StartLimitBurst bounds the boot-race retries).
+# The wlvpn tunnel unit: installed but NOT a boot-time unit (no [Install]
+# section) — it comes up on demand via the bookbub unit's Requires= and is
+# torn down by that unit's ExecStopPost, so the VPN is only connected while a
+# run is in use. It still needs `nordvpn login --token` done once by
+# WISHLIST_VPN_USER (see above); until then it cannot come up, and a bookbub
+# run then fails fast (Requires=) — which must never block a deploy.
 install -m 644 "$APP_DIR/amazon-wishlist-vpn.service" /etc/systemd/system/amazon-wishlist-vpn.service
-# BookBub daily updater (scripts/bookbub_daily.py): a oneshot service that
-# runs inside the wlvpn netns, fired daily at 18:00 local by its timer. The
-# TIMER is the unit that gets enabled; the service's start below is
-# best-effort — a missing BOOKBUB_LOGIN_LINK makes the run exit 2, and that
-# must never block a deploy.
+# BookBub daily updater (scripts/bookbub_daily.py): a oneshot service that runs
+# inside the wlvpn netns. It is NO LONGER timer-driven: the APP schedules the
+# run (app/scheduler.py, at the BookBub time set in the Settings tab) by
+# starting this unit via the scoped sudoers rule provisioned below — so this
+# deploy must NOT start it (a run blocks for the whole cycle, ~an hour).
 install -m 644 "$APP_DIR/amazon-wishlist-bookbub.service" /etc/systemd/system/amazon-wishlist-bookbub.service
-install -m 644 "$APP_DIR/amazon-wishlist-bookbub.timer" /etc/systemd/system/amazon-wishlist-bookbub.timer
+# Retire the timer if a previous install left it (the app now schedules the run).
+systemctl disable --now amazon-wishlist-bookbub.timer 2>/dev/null || true
+systemctl remove amazon-wishlist-bookbub.timer 2>/dev/null || true
 systemctl daemon-reload
 systemctl enable amazon-wishlist.service
-systemctl enable amazon-wishlist-vpn.service
-systemctl enable amazon-wishlist-bookbub.timer
+# The wlvpn tunnel is no longer a boot-time unit: disable it if a previous
+# install enabled it, and stop it if it is up right now (VPN down unless a run
+# is in use).
+systemctl disable --now amazon-wishlist-vpn.service 2>/dev/null || true
+systemctl stop amazon-wishlist-vpn.service 2>/dev/null || true
+# Scoped sudoers rule (NOT blanket sudo — same pattern as the vpn_verify.sh
+# scoped rule): lets the app (the wishlist user) start the netns-bound bookbub
+# unit on schedule, and lets the bookbub unit's ExecStopPost tear the VPN down.
+# visudo -cf validates the rule; a malformed one aborts the deploy (set -e).
+cat > /etc/sudoers.d/amazon-wishlist <<'SUDOERS'
+wishlist ALL=(root) NOPASSWD: /usr/bin/systemctl start amazon-wishlist-bookbub.service, /usr/bin/systemctl stop amazon-wishlist-vpn.service
+SUDOERS
+chmod 0440 /etc/sudoers.d/amazon-wishlist
+visudo -cf /etc/sudoers.d/amazon-wishlist
 systemctl restart amazon-wishlist.service
-systemctl start amazon-wishlist-vpn.service || true
-systemctl start amazon-wishlist-bookbub.timer || true
-systemctl start amazon-wishlist-bookbub.service || true
 systemctl status --no-pager amazon-wishlist.service || true
+# "inactive (dead)" for the tunnel unit here is the healthy state: it is only
+# active while the daily BookBub run is in progress.
 systemctl status --no-pager amazon-wishlist-vpn.service || true
-systemctl status --no-pager amazon-wishlist-bookbub.service || true
-systemctl list-timers --all --no-pager | grep -F bookbub || true
 
 echo
 echo "Installed. Visit http://<host>:9060/"
