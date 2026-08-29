@@ -379,16 +379,19 @@ def current_deals(conn: sqlite3.Connection) -> list[dict]:
 
     Returns ``{id, title, author, date, deal_price, original_price,
     amazon_url}`` dicts for every row the app presents as an in-flight deal:
-    ``deal_status`` is ``current`` (verified live on Amazon) **and**
-    ``amazon_url`` is present (the tab links the title to Amazon). That
-    excludes expired deals, ``unknown`` deals (unreadable — treated as
-    unverified), and unchecked deals (``deal_status`` NULL) at the query
-    layer. Newest first (``date DESC, id DESC``); ``date`` is reformatted
-    from ``YYYYMMDD`` to ``YYYY-MM-DD`` for display.
+    ``deal_status`` is ``current`` (verified live on Amazon), ``amazon_url``
+    is present (the tab links the title to Amazon), and the book is **not**
+    owned in Grimmory (``owned_in_grimmory`` is 0 or NULL/unknown — avoid
+    showing books the user already owns). Newest first
+    (``date DESC, id DESC``); ``date`` is reformatted from ``YYYYMMDD`` to
+    ``YYYY-MM-DD`` for display. This excludes expired deals, ``unknown``
+    deals (unreadable — treated as unverified), unchecked deals
+    (``deal_status`` NULL), and books already owned.
     """
     rows = conn.execute(
         "SELECT id, date, title, author, deal_price, original_price, amazon_url "
         "FROM deal WHERE deal_status = ? AND amazon_url IS NOT NULL "
+        "AND owned_in_grimmory IS NOT 1 "
         "ORDER BY date DESC, id DESC",
         (DEAL_STATUS_CURRENT,),
     ).fetchall()
