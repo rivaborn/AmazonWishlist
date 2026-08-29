@@ -43,6 +43,13 @@ Open <http://localhost:9060/wishlists>, paste a public wishlist URL, click **Add
 
 For a quick smoke test (no network — uses fake scraped items): `python scripts/_smoke.py`.
 
+**Secrets & config for local runs** go in a repo-root `.env` file (gitignored, never
+committed): copy [`.env.example`](.env.example) to `.env` and fill in the values. It is
+loaded automatically at startup by `app/config.py` (real environment variables win over
+it, so anything you `export` still takes precedence). On the **Ubuntu host** credentials
+are not read from `.env` but from `/etc/default/amazon-wishlist` via the service unit's
+`EnvironmentFile` — see "Configuration (env vars)".
+
 ## Production deploy on Ubuntu
 
 ```bash
@@ -80,7 +87,17 @@ If a scrape returned 0 items for a list and you want to see *why*, look in `/opt
 
 ## Configuration (env vars)
 
-Set in `amazon-wishlist.service` under `Environment=` if you need to override.
+On the Ubuntu host the app is configured through env vars — either `Environment=` in
+`amazon-wishlist.service` or (secrets and host-specific knobs) the values it loads
+from `EnvironmentFile=/etc/default/amazon-wishlist`. For **local development** you can
+instead put any of the keys below into a repo-root `.env` file: `app/config.py` loads it
+at startup. `.env` is **gitignored and never committed** — copy
+[`.env.example`](.env.example) to `.env` and fill in your own values. An already-set
+real environment variable always wins over `.env`, so this is purely a local convenience
+and can never override what the host's systemd env provides. Secrets shared across
+environments (`BOOKBUB_USERNAME`/`PASSWORD`, `GRIMMORY_USERNAME`/`PASSWORD`,
+`NORDVPN_USERNAME`/`PASSWORD`, `BOOKBUB_LOGIN_LINK`) belong in `.env` on a dev box and
+in `/etc/default/amazon-wishlist` in production — never in a committed file.
 
 | var | default | meaning |
 | --- | --- | --- |

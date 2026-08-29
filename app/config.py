@@ -1,9 +1,20 @@
 import os
 from pathlib import Path
 
+# Load an optional, gitignored `.env` from the repo root BEFORE any env var is
+# read, so secrets and overrides can live in one local file for development.
+# Existing environment always wins over `.env` (on the host, systemd's
+# `EnvironmentFile` at `/etc/default/amazon-wishlist` is authoritative — a
+# stray `.env` there could never shadow it). This only fills in keys that are
+# not already set. Never commit `.env` (see `.env.example` for the safe scaffold).
+from .dotenv import load_dotenv
+
 BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = BASE_DIR / "data"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+# Seed secrets/overrides from the repo-root `.env` if present (no-op otherwise).
+load_dotenv(BASE_DIR / ".env")
 
 DB_PATH = Path(os.environ.get("WISHLIST_DB", DATA_DIR / "wishlist.db"))
 LOG_PATH = Path(os.environ.get("WISHLIST_LOG", DATA_DIR / "scrape.log"))

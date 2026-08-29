@@ -32,6 +32,7 @@ mkdir -p "$APP_DIR"
 # installed Playwright supports the reinstall below can't put it back.
 rsync -a --delete \
   --exclude=".git" --exclude=".venv" --exclude="data" --exclude=".cache" --exclude="__pycache__" \
+  --exclude=".env" \
   "$REPO_DIR"/ "$APP_DIR"/
 mkdir -p "$APP_DIR/data"
 
