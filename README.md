@@ -120,6 +120,7 @@ Set in `amazon-wishlist.service` under `Environment=` if you need to override.
 ## Pages
 
 - **/deals** — books on a wishlist whose latest snapshot is below baseline by ≥ filters. Filter by minimum dollar drop, minimum percent drop, and basis (vs. previous observed price or vs. list/strikethrough price).
+- **/bookbub-deals** — the BookBub Deals tab: BookBub deals currently verified live on Amazon (see "Verifying deals are still live" below). Each row shows Title (a link that opens the Amazon product page in a new tab), Author, Deal price, Regular price, and Date of Deal. Its source is `data/deals.db` (`DEALS_DB`): only rows with `deal_status = 'current'` and an `amazon_url` are listed, newest deal first — expired, unverified (NULL status), and unreadable (`unknown`) deals are omitted. Read-only on both instances.
 - **/books** — every available book across all wishlists, sorted by current price ascending. Header shows total count, lowest, and highest.
 - **/no-price** — split into "Kindle edition unavailable" and "Removed from Amazon" (HTTP 404).
 - **/price-drops** — every historical snapshot that dropped vs. its baseline, filtered.
