@@ -25,6 +25,13 @@ One run does the whole daily cycle:
    updater runs inside the wlvpn netns where the Grimmory server is not
    reachable.)
 
+   Finally it **removes duplicates created by the new books**:
+   ``deals_db.deduplicate`` collapses every book that was featured on several
+   dates down to its most recent deal (identity: the Amazon ASIN, else the
+   normalised title+author — ``deals_db.book_identity``), so the tab never
+   shows the same book twice. All three — fetch, owned refresh, and dedupe —
+   run at the single configured daily time (the Settings tab).
+
 2. **Re-verify** — invoke ``scripts/verify_deals.py`` in ``--recheck`` mode
    (as a module) so every deal that is NOT yet ``expired`` — i.e.
    ``current`` / ``unknown`` / unchecked — is re-read against its current
@@ -179,6 +186,26 @@ def main() -> int:
                  updated, GRIMMORY_DB)
     except Exception as e:
         log.warning("owned_in_grimmory refresh failed (continuing): %s", e)
+
+    # (1c) Remove duplicates created by the new books. A book re-featured on
+    #      a later date stores a second row for the same book (rows are keyed
+    #      by (date, bookbub_url) for audit), so collapse the repeats to the
+    #      most recent deal per book — the same deals_db.deduplicate() the
+    #      manual scripts/dedup_deals.py runs. Best-effort like the owned
+    #      refresh: a DB error is logged, not fatal — the re-verify step
+    #      still runs.
+    try:
+        conn = deals_db.connect(args.db)
+        try:
+            deals_db.ensure_schema(conn)  # idempotent
+            removed = deals_db.deduplicate(conn)
+            conn.commit()
+        finally:
+            conn.close()
+        log.info("removed %d duplicate deal row(s), keeping the most recent deal per book",
+                 removed)
+    except Exception as e:
+        log.warning("deduplicate failed (continuing): %s", e)
 
     # (2) Re-verify every non-expired deal (expired is never re-checked).
     #     verify_deals.main() parses sys.argv[1:], so swap it for our own args.
