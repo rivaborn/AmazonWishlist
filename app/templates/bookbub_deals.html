@@ -2,7 +2,13 @@
 {% block title %}BookBub Deals{% endblock %}
 {% block content %}
 <h2>BookBub Deals</h2>
-<p class="hint">BookBub deals verified live on Amazon right now. Expired and unverified deals are not shown.</p>
+<p class="hint">BookBub deals verified live on Amazon right now. Expired, unverified, and hidden deals are not shown.
+  <label class="show-hidden">
+    <input type="checkbox" id="show-hidden-cb" {{ 'checked' if show_hidden else '' }}
+           onchange="location.href = '/bookbub-deals' + (this.checked ? '?show_hidden=1' : '')">
+    Show Hidden
+  </label>
+</p>
 
 {% if not rows %}
   <p class="empty">No current BookBub deals. Verify the deals in data/deals.db (scripts/verify_deals.py) and try again.</p>
@@ -17,6 +23,7 @@
 <table>
   <thead>
     <tr>
+      <th class="cb-col"></th>
       <th>Title</th><th>Author</th>
       <th><a href="/bookbub-deals?sort=price&dir={{ price_next }}" class="{{ 'sort-active' if sort == 'price' }}">Deal price{% if sort == 'price' %} {{ '▲' if dir == 'asc' else '▼' }}{% endif %}</a></th>
       <th>Regular price</th>
@@ -26,6 +33,7 @@
   <tbody>
   {% for r in rows %}
     <tr>
+      <td class="cb-col"><input type="checkbox" class="hide-cb" data-id="{{ r.id }}" {{ 'checked' if r.hidden else '' }} title="Hide this book from the list"></td>
       <td><a href="{{ r.amazon_url }}" target="_blank" rel="noopener">{{ r.title }}</a></td>
       <td>{{ r.author or '' }}</td>
       <td>{{ r.deal_price or '—' }}</td>
@@ -37,4 +45,38 @@
 </table>
 {% with pager=pagination %}{% include "_pagination.html" %}{% endwith %}
 {% endif %}
+<script>
+// Per-row hide checkbox (BookBub Deals tab only): POSTs the toggle to the
+// API and, when hiding on the normal (Show-Hidden-off) view, fades the row
+// out — it would not appear after a reload anyway. Reverts on failure.
+(function () {
+  document.addEventListener('change', async function (e) {
+    var cb = e.target.closest && e.target.closest('.hide-cb');
+    if (!cb) return;
+    cb.disabled = true;
+    try {
+      var r = await fetch('/api/deals/' + cb.dataset.id + '/hidden', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({hidden: cb.checked}),
+      });
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      if (cb.checked) {
+        var sh = document.getElementById('show-hidden-cb');
+        var tr = cb.closest('tr');
+        if (tr && (!sh || !sh.checked)) {
+          tr.style.transition = 'opacity .25s';
+          tr.style.opacity = '0.3';
+          setTimeout(function () { tr.remove(); }, 250);
+        }
+      }
+    } catch (err) {
+      cb.checked = !cb.checked;
+      console.error('Failed to update hidden flag:', err);
+    } finally {
+      cb.disabled = false;
+    }
+  });
+})();
+</script>
 {% endblock %}

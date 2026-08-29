@@ -4,7 +4,7 @@ from typing import Optional
 from fastapi import APIRouter, Body, Depends, Form, HTTPException
 from fastapi.responses import JSONResponse, RedirectResponse
 
-from .. import config, services
+from .. import config, deals_db, services
 
 router = APIRouter(prefix="/api")
 _executor = ThreadPoolExecutor(max_workers=1)
@@ -62,3 +62,25 @@ def set_purchased(asin: str, body: dict = Body(...)):
     except KeyError:
         raise HTTPException(404, f"unknown asin: {asin}")
     return {"asin": asin, "purchased": purchased}
+
+
+@router.post("/deals/{row_id}/hidden", dependencies=[Depends(_require_primary)])
+def set_deal_hidden(row_id: int, body: dict = Body(...)):
+    """Hide/show one BookBub deal row (the BookBub Deals tab's row checkbox).
+
+    The flag lives in deals.db — a per-instance UI preference that the mirror
+    never syncs — so, like the purchased toggle, it is primary-only.
+    """
+    if "hidden" not in body:
+        raise HTTPException(400, "missing 'hidden' field")
+    hidden = bool(body["hidden"])
+    conn = deals_db.connect(config.DEALS_DB)
+    try:
+        deals_db.ensure_schema(conn)  # idempotent (adds the hidden column if missing)
+        ok = deals_db.set_hidden(conn, row_id, hidden)
+        conn.commit()
+    finally:
+        conn.close()
+    if not ok:
+        raise HTTPException(404, f"unknown deal id: {row_id}")
+    return {"id": row_id, "hidden": hidden}

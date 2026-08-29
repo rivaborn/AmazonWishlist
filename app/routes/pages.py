@@ -89,6 +89,7 @@ def bookbub_deals_page(
     request: Request,
     sort: str = Query("date", alias="sort"),
     direction: str = Query("desc", alias="dir"),
+    show_hidden: bool = Query(False),
     page: int = Query(1, ge=1),
     per_page: int = Query(DEFAULT_PER_PAGE),
 ):
@@ -101,14 +102,17 @@ def bookbub_deals_page(
     `?sort=price|date` + `?dir=asc|desc` (both whitelisted, default
     date-desc = most recent first); sorting the full list before pagination
     keeps every page consistently ordered and the extra_query carries the
-    active sort into every page link.
+    active sort into every page link. `?show_hidden=1` also reveals rows the
+    user has hidden (hidden rows are excluded by default).
     """
     s = _bookbub_sort(sort)
     d = _bookbub_dir(direction)
     conn = deals_db.connect(config.DEALS_DB)
     try:
         deals_db.ensure_schema(conn)  # idempotent (adds verification cols if missing)
-        rows = deals_db.sort_deals(deals_db.current_deals(conn), sort=s, direction=d)
+        rows = deals_db.sort_deals(
+            deals_db.current_deals(conn, show_hidden=show_hidden), sort=s, direction=d
+        )
     finally:
         conn.close()
     pagination = paginate(
@@ -116,7 +120,7 @@ def bookbub_deals_page(
         page=page,
         per_page=_per_page(per_page),
         base_url="/bookbub-deals",
-        extra_query={"sort": s, "dir": d},
+        extra_query={"sort": s, "dir": d, "show_hidden": show_hidden},
     )
     return templates.TemplateResponse(
         request,
@@ -127,6 +131,7 @@ def bookbub_deals_page(
                 "pagination": pagination,
                 "sort": s,
                 "dir": d,
+                "show_hidden": show_hidden,
                 "active": "bookbub",
             }
         ),
