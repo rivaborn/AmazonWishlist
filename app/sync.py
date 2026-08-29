@@ -21,13 +21,16 @@ or a second process writing to the same DB, would break this silently.
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import os
 import sqlite3
 import threading
 from datetime import datetime
+from pathlib import Path
 
+from . import deals_db
 from .config import (
     INGEST_SHRINK_FLOOR,
     SYNC_PAGE_LIMIT,
@@ -71,6 +74,30 @@ BOOK_COLUMNS = (
     "first_seen",
     "last_seen",
     "purchased",
+)
+
+# The whole BookBub `deal` table mirrors to a secondary (GET /api/sync/deals).
+# All columns — the mirror duplicates the primary's deals page, including the
+# captured cover filename + description, the owned audit, and the per-row
+# hidden flag (the secondary's own hide toggles are 403 anyway).
+DEAL_COLUMNS = (
+    "id",
+    "date",
+    "title",
+    "author",
+    "deal_price",
+    "original_price",
+    "bookbub_url",
+    "amazon_url",
+    "no_amazon_link",
+    "owned_in_grimmory",
+    "audited_at",
+    "deal_status",
+    "current_price",
+    "verified_at",
+    "hidden",
+    "cover",
+    "description",
 )
 
 
@@ -378,6 +405,125 @@ def _warn_id_collision(conn: sqlite3.Connection, row: list) -> None:
             row[idx["asin"]],
             row[idx["observed_at"]],
         )
+
+
+# ---------- Deals mirror (BookBub: whole table + covers, once a day) ----------
+# Deliberately NOT watermark-based: the deals table is small (~a few hundred
+# rows) and has no FK coupling to wishlist.db, so a whole-table replace on
+# each sync is simpler and always converges. The secondary is read-only for
+# this DB (hide toggles are primary-only), so re-inserting the primary's
+# explicit ids cannot collide with local inserts. Covers travel as base64 in
+# the same payload — acceptable for a once-a-day LAN sync.
+
+
+def _check_deals_format(payload: dict) -> None:
+    """The deals payload shares the mirror protocol version with the rest."""
+    _check_format(payload)
+
+
+def export_deals() -> dict:
+    """The primary's whole BookBub deals DB + cover images (base64).
+
+    Every ``deal`` row (all columns) in id order, plus ``covers``: a dict
+    ``{cover_filename: base64}`` for every file present in
+    ``DEALS_COVERS_DIR`` (unreadable files are skipped, not fatal). The
+    secondary applies this via :func:`apply_deals` inside the same once-a-day
+    pull as the catalog + snapshots, so the mirror's BookBub Deals page
+    duplicates the primary's (requirement: "pull all the details needed to
+    duplicate the bookbub deals page").
+
+    The DB/covers paths are read from config at call time (like
+    ``get_sync_status``) so tests can re-point them at temp files.
+    """
+    from . import config
+
+    conn = deals_db.connect(config.DEALS_DB)
+    try:
+        deals_db.ensure_schema(conn)  # idempotent (adds new columns if missing)
+        deals = [
+            dict(zip(DEAL_COLUMNS, row))
+            for row in conn.execute(
+                f"SELECT {', '.join(DEAL_COLUMNS)} FROM deal ORDER BY id"
+            ).fetchall()
+        ]
+    finally:
+        conn.close()
+
+    covers: dict[str, str] = {}
+    covers_dir = Path(config.DEALS_COVERS_DIR)
+    if covers_dir.is_dir():
+        for f in sorted(covers_dir.iterdir()):
+            if not f.is_file():
+                continue
+            try:
+                covers[f.name] = base64.b64encode(f.read_bytes()).decode("ascii")
+            except OSError as exc:
+                log.warning("deals export: skipping unreadable cover %s: %s", f.name, exc)
+
+    return {
+        "format": SYNC_FORMAT,
+        "source_now": _now(),
+        "deals": deals,
+        "covers": covers,
+    }
+
+
+def apply_deals(payload: dict, covers_dir: str | Path) -> dict:
+    """Replace the local ``deal`` rows with the primary's and write covers.
+
+    One transaction for the DB: ``DELETE FROM deal`` + re-insert every row
+    with the primary's explicit ids (``sqlite_sequence`` is not reset by a
+    DELETE, and a mirror never inserts local rows, so ids cannot collide);
+    a failure rolls the whole thing back and the prior mirror is intact.
+    Cover files are written to ``covers_dir`` atomically (tmp +
+    ``os.replace``); a failed cover write is logged, not fatal — the rows are
+    the deliverable. Returns ``{"deals": n, "covers": m}``.
+
+    ``covers_dir`` is an explicit argument (the caller passes
+    ``config.DEALS_COVERS_DIR``); the deals DB path is read from config at
+    call time so tests can re-point it at a temp file.
+    """
+    from . import config
+
+    _check_deals_format(payload)
+    deals = payload.get("deals") or []
+    covers = payload.get("covers") or {}
+
+    conn = deals_db.connect(config.DEALS_DB)
+    try:
+        deals_db.ensure_schema(conn)  # idempotent (adds new columns if missing)
+        conn.execute("BEGIN")
+        try:
+            conn.execute("DELETE FROM deal")
+            placeholders = ", ".join("?" * len(DEAL_COLUMNS))
+            conn.executemany(
+                f"INSERT INTO deal ({', '.join(DEAL_COLUMNS)}) VALUES ({placeholders})",
+                [tuple(d.get(c) for c in DEAL_COLUMNS) for d in deals],
+            )
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+    finally:
+        conn.close()
+
+    written = 0
+    dest = Path(covers_dir)
+    dest.mkdir(parents=True, exist_ok=True)
+    for name, b64 in covers.items():
+        safe = Path(name).name
+        if safe != name:  # traversal guard (names come from the peer)
+            log.warning("deals apply: skipping cover with unsafe name %r", name)
+            continue
+        try:
+            tmp = dest / f"{safe}.tmp"
+            tmp.write_bytes(base64.b64decode(b64))
+            os.replace(tmp, dest / safe)
+            written += 1
+        except (OSError, ValueError) as exc:
+            log.warning("deals apply: failed to write cover %s: %s", name, exc)
+
+    return {"deals": len(deals), "covers": written}
 
 
 # ---------- advisory sync state (telemetry only; the cursor is the DB) ----------

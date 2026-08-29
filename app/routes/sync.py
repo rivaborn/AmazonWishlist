@@ -3,6 +3,7 @@
 Export endpoints (served by the primary, consumed by the secondary):
   GET  /api/sync/catalog    → wishlists + books + membership + max_snapshot_id
   GET  /api/sync/snapshots  → one ascending page of the price_snapshot log
+  GET  /api/sync/deals      → the whole BookBub deals table + covers (base64)
 
 Local endpoints (about THIS instance's own mirroring):
   GET  /api/sync/status     → last sync, watermark, error
@@ -36,6 +37,12 @@ def sync_snapshots(
     limit: int = Query(None),
 ):
     return sync.export_snapshots(since_id, max_id, limit)
+
+
+@router.get("/deals")
+def sync_deals():
+    """The primary's whole BookBub deals DB + covers (the mirror pull)."""
+    return sync.export_deals()
 
 
 @router.get("/status")
