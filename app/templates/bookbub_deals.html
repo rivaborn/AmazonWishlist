@@ -17,6 +17,20 @@
       {% endfor %}
     </select>
   </label>
+  {# Cover-size dropdown (req 6C / req 2): saves the default cover size via
+     the same POST /api/settings as the Settings tab, then reloads. A control
+     that writes — so it does not render on a read-only mirror. #}
+  {% if not readonly %}
+  <label class="per-page cover-size">
+    Cover size
+    <select id="cover-size-select"
+            onchange="fetch('/api/settings', {method: 'POST', body: new URLSearchParams({cover_size: this.value})}).then(function (r) { if (r.ok) location.reload(); else { console.error('Failed to save cover size (HTTP ' + r.status + ')'); } })">
+      {% for opt in cover_size_options %}
+      <option value="{{ opt }}"{% if opt == cover_size %} selected{% endif %}>{{ opt }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  {% endif %}
 </p>
 
 {% if not rows %}
@@ -29,7 +43,7 @@
    current sort state on the active column. #}
 {% set price_next = 'desc' if (sort == 'price' and dir == 'asc') else 'asc' %}
 {% set date_next = 'asc' if (sort == 'date' and dir == 'desc') else 'desc' %}
-<table>
+<table class="covers-{{ cover_size }}">
   <thead>
     <tr>
       <th class="cover-col"></th>
@@ -43,7 +57,7 @@
   <tbody>
   {% for r in rows %}
     <tr>
-      <td class="cover-col">{% if r.cover %}<img class="deal-cover" src="/covers/{{ r.cover }}" alt="{{ r.title }}">{% endif %}</td>
+      <td class="cover-col">{% if r.cover %}<img class="deal-cover size-{{ cover_size }}" src="/covers/{{ r.cover }}" alt="{{ r.title }}"{% if r.description %} title="{{ r.description }}"{% endif %}>{% endif %}</td>
       <td class="cb-col"><input type="checkbox" class="hide-cb" data-id="{{ r.id }}" {{ 'checked' if r.hidden else '' }} title="Hide this book from the list"></td>
       <td><a href="{{ r.amazon_url }}" target="_blank" rel="noopener"{% if r.description %} title="{{ r.description }}"{% endif %}>{{ r.title }}</a></td>
       <td>{{ r.author or '' }}</td>

@@ -72,6 +72,15 @@ td.stale { color: var(--muted); }
 td.cover-col img.deal-cover { width: 30px; height: auto; border-radius: 2px; vertical-align: middle; }
 .per-page { white-space: nowrap; margin-left: .75rem; display: inline-flex; align-items: center; gap: .35rem; }
 .per-page select { padding: .1rem .3rem; font-size: .85rem; }
+/* Cover-size variants (1x/2x/4x) — the stored cover_size setting drives the
+   `size-*` class on each cover and the `covers-*` class on the table, so the
+   column widens with the image instead of clipping it. */
+td.cover-col img.deal-cover.size-1x { width: 64px; }
+td.cover-col img.deal-cover.size-2x { width: 128px; }
+td.cover-col img.deal-cover.size-4x { width: 256px; }
+table.covers-1x .cover-col { width: 74px; }
+table.covers-2x .cover-col { width: 138px; }
+table.covers-4x .cover-col { width: 266px; }
 td.cb-col input.purchased-cb { cursor: pointer; transform: scale(1.1); }
 td.cb-col input.purchased-cb:disabled { cursor: progress; }
 

@@ -117,13 +117,17 @@ def bookbub_deals_page(
     `?show_hidden=1` also reveals rows the user has hidden (hidden rows are
     excluded by default). Each row shows the captured book cover (served from
     the local covers dir at /covers/<name>) by the title and the captured
-    Amazon description as a hover tooltip. Page size comes from the per-page
-    dropdown (BOOKBUB_PER_PAGE_OPTIONS, default 20) and is preserved across
-    pagination and sort links via `?per_page=`.
+    Amazon description as a hover tooltip on BOTH the cover and the title.
+    Page size comes from the per-page dropdown (BOOKBUB_PER_PAGE_OPTIONS,
+    default 20) and is preserved across pagination and sort links via
+    `?per_page=`. Cover size comes from the stored `cover_size` setting
+    (Settings tab / the per-page cover-size dropdown, default
+    BOOKBUB_COVER_SIZE_DEFAULT) and is applied as a `size-*` class.
     """
     s = _bookbub_sort(sort)
     d = _bookbub_dir(direction)
     pp = _bookbub_per_page(per_page)
+    cover_size = settings.get("cover_size", config.BOOKBUB_COVER_SIZE_DEFAULT)
     conn = deals_db.connect(config.DEALS_DB)
     try:
         deals_db.ensure_schema(conn)  # idempotent (adds verification cols if missing)
@@ -151,6 +155,9 @@ def bookbub_deals_page(
                 "show_hidden": show_hidden,
                 "per_page": pp,
                 "per_page_options": config.BOOKBUB_PER_PAGE_OPTIONS,
+                "cover_size": cover_size,
+                "cover_size_options": config.BOOKBUB_COVER_SIZE_OPTIONS,
+                "cover_size_default": config.BOOKBUB_COVER_SIZE_DEFAULT,
                 "active": "bookbub",
             }
         ),
