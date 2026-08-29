@@ -89,6 +89,16 @@ from app.config import (  # noqa: E402
 log = logging.getLogger("verify_deals")
 
 
+def _selection(args):
+    """Row selector for this run.
+
+    ``--recheck`` (the daily updater's mode) re-verifies everything that is
+    not terminal: ``current`` + ``unknown`` + unchecked. Default mode only
+    checks the never-checked deals. ``expired`` is excluded either way.
+    """
+    return deals_db.recheck_deals if getattr(args, "recheck", False) else deals_db.pending_deals
+
+
 def _now() -> str:
     return datetime.datetime.now().isoformat(timespec="seconds")
 
@@ -205,11 +215,11 @@ def _resolve_scope(conn, db_path: Path, args) -> list[dict]:
     source of truth) — so a finished scope is a fast no-op. A different
     --db/--limit (or --fresh) starts a new scope.
     """
-    key = [str(db_path), args.limit]
+    key = [str(db_path), args.limit, bool(getattr(args, "recheck", False))]
     meta = None if args.fresh else _load_progress()
     if meta and meta.get("key") == key and meta.get("scope"):
         scope = set(meta["scope"])
-        work = [d for d in deals_db.pending_deals(conn) if d["id"] in scope]
+        work = [d for d in _selection(args)(conn) if d["id"] in scope]
         if not work:
             print(f"nothing to verify: all {len(scope)} deal(s) in this run's scope "
                   f"are already verified (re-run of a completed scope). "
@@ -217,7 +227,7 @@ def _resolve_scope(conn, db_path: Path, args) -> list[dict]:
             return []
         print(f"resuming saved scope: {len(work)}/{len(scope)} deal(s) still pending")
         return work
-    pending = deals_db.pending_deals(conn, limit=args.limit)
+    pending = _selection(args)(conn, limit=args.limit)
     _write_progress(
         {
             "key": key,
@@ -243,7 +253,8 @@ def _run(args) -> int:
 
         mode = (f"netns {args.netns} (tunnel mode)" if args.netns
                 else f"pool: {', '.join(NORDVPN_COUNTRIES)}")
-        print(f"pending: {len(pending)} deals | rotate every {args.rotate_every} books "
+        which = "recheckable (non-expired)" if args.recheck else "pending"
+        print(f"pending: {len(pending)} {which} deals | rotate every {args.rotate_every} books "
               f"| {mode} | jitter {VERIFY_DELAY_MIN:g}-{VERIFY_DELAY_MAX:g}s "
               f"| LLM: {LLM_MODEL or 'off'}")
 
@@ -420,6 +431,11 @@ def main() -> int:
                     help="Dry run: print the pending count + config, connect nothing, exit 0.")
     ap.add_argument("--fresh", action="store_true",
                     help="Start a new run scope, ignoring a saved one for the same --db/--limit.")
+    ap.add_argument("--recheck", action="store_true",
+                    help="Re-verify deals that are still 'current' or 'unknown' (plus the "
+                         "unchecked ones) instead of only the never-checked deals; 'expired' "
+                         "is terminal and is never re-checked. Used by the daily updater "
+                         "(scripts/bookbub_daily.py).")
     args = ap.parse_args()
     if args.rotate_every < 1:
         ap.error("--rotate-every must be >= 1")
@@ -429,10 +445,11 @@ def main() -> int:
     if args.check:
         conn = deals_db.connect(args.db)
         try:
-            n = len(deals_db.pending_deals(conn, limit=args.limit))
+            n = len(_selection(args)(conn, limit=args.limit))
         finally:
             conn.close()
-        print(f"check: {n} pending deal(s) with an ASIN in {args.db}")
+        which = "recheckable (non-expired)" if args.recheck else "pending"
+        print(f"check: {n} {which} deal(s) with an ASIN in {args.db}")
         print(f"check: rotate every {args.rotate_every} | start country {NORDVPN_START_COUNTRY} "
               f"| pool {', '.join(NORDVPN_COUNTRIES)} | jitter {VERIFY_DELAY_MIN:g}-{VERIFY_DELAY_MAX:g}s "
               f"| retries {VERIFY_MAX_RETRIES} (backoff {VERIFY_RETRY_BACKOFF:g}s) "

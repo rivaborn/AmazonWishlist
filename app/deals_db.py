@@ -49,6 +49,7 @@ __all__ = [
     "current_deals",
     "sort_deals",
     "set_hidden",
+    "recheck_deals",
 ]
 
 # --------------------------------------------------------------------------- #
@@ -370,6 +371,41 @@ def mark_verified(
         "UPDATE deal SET deal_status = ?, current_price = ?, verified_at = ? WHERE id = ?",
         (status, current_price, at, row_id),
     )
+
+
+def recheck_deals(conn: sqlite3.Connection, limit: int | None = None) -> list[dict]:
+    """Deals the daily updater must (re-)verify: everything EXCEPT expired.
+
+    Like :func:`pending_deals` but selects rows whose ``deal_status`` is NULL
+    (never checked) or ``current`` / ``unknown`` (still believed live, or
+    unreadable last time — worth another look). An ``expired`` deal is
+    terminal and is NEVER re-checked (requirement: "Expired deals are never
+    checked again"). Same ``{id, asin, amazon_url, deal_price, title}`` shape
+    as ``pending_deals``, ASIN-filtered the same way, ``limit`` applied after
+    the ASIN filter.
+    """
+    rows = conn.execute(
+        "SELECT id, amazon_url, deal_price, title FROM deal "
+        "WHERE (deal_status IS NULL OR deal_status IN (?, ?)) "
+        "AND amazon_url IS NOT NULL ORDER BY id",
+        (DEAL_STATUS_CURRENT, DEAL_STATUS_UNKNOWN),
+    ).fetchall()
+    out: list[dict] = []
+    for row_id, url, deal_price, title in rows:
+        asin = asin_from_amazon_url(url)
+        if asin:
+            out.append(
+                {
+                    "id": row_id,
+                    "asin": asin,
+                    "amazon_url": url,
+                    "deal_price": deal_price,
+                    "title": title,
+                }
+            )
+            if limit is not None and len(out) >= limit:
+                break
+    return out
 
 
 def _format_deal_date(date: str | None) -> str:
