@@ -1,0 +1,69 @@
+# Amazon Wishlist daily BookBub deal updater (scripts/bookbub_daily.py) run
+# INSIDE the `wlvpn` NordVPN/WireGuard namespace so ONLY the re-verify pass's
+# Amazon price reads egress through NordVPN — the same fail-closed guarantee
+# as amazon-wishlist-verify.service (the BookBub fetch itself also routes
+# through the tunnel, which is harmless).
+#
+# amazon-wishlist-vpn.service owns the namespace (BindsTo=). Triggered daily
+# at 18:00 local by amazon-wishlist-bookbub.timer, or on demand:
+#   systemctl start amazon-wishlist-bookbub.service
+# Follow progress: journalctl -u amazon-wishlist-bookbub -f
+#
+# What one run does:
+#   1. fetch today's BookBub daily deals (BOOKBUB_LOGIN_LINK from
+#      /etc/default/amazon-wishlist — a per-day rotating token from the daily
+#      email; a missing link exits the run 2, a stale link fails the fetch),
+#   2. upserts them into DEALS_DB with the owned_in_grimmory flag
+#      (GRIMMORY_DB; owned books are hidden from the tab automatically),
+#   3. re-verifies every NON-EXPIRED deal against live Amazon prices
+#      (expired deals are never re-checked); newly current deals flow into
+#      the BookBub Deals tab automatically.
+#
+# install_systemd.sh reinstalls this unit from the repo on every deploy, so a
+# hand-edit here is reverted. (If you override WISHLIST_VPN_NS away from the
+# default `wlvpn`, update NetworkNamespacePath/BindReadOnlyPaths and the
+# --netns argument to match.)
+#
+# The NordVPN session is already negotiated by amazon-wishlist-vpn.service as
+# WISHLIST_VPN_USER — this unit needs NO NordVPN credentials and stores none.
+# Per-host settings (BOOKBUB_LOGIN_LINK, DEALS_DB, GRIMMORY_DB, VERIFY_*,
+# WISHLIST_VPN_*) go in /etc/default/amazon-wishlist.
+
+[Unit]
+Description=Amazon Wishlist daily BookBub deal updater (via wlvpn VPN namespace)
+After=amazon-wishlist-vpn.service
+Requires=amazon-wishlist-vpn.service
+BindsTo=amazon-wishlist-vpn.service
+
+[Service]
+Type=oneshot
+User=wishlist
+Group=wishlist
+WorkingDirectory=/opt/amazon-wishlist
+# Run inside the VPN namespace; bind its Nord DNS over /etc/resolv.conf.
+NetworkNamespacePath=/var/run/netns/wlvpn
+BindReadOnlyPaths=/etc/netns/wlvpn/resolv.conf:/etc/resolv.conf
+# Headless Chromium (BookBub fetch + Amazon price reader) needs the same
+# browser/home environment as the app unit — the browser lives only under
+# /opt/amazon-wishlist.
+Environment="HOME=/opt/amazon-wishlist"
+Environment="XDG_RUNTIME_DIR=/tmp/runtime-wishlist"
+Environment="PLAYWRIGHT_BROWSERS_PATH=/opt/amazon-wishlist/.cache/playwright"
+Environment="PLAYWRIGHT_HOST_PLATFORM_OVERRIDE=ubuntu24.04-x64"
+# Per-host overrides (BOOKBUB_LOGIN_LINK, DEALS_DB, GRIMMORY_DB, VERIFY_*,
+# WISHLIST_VPN_*). Optional: the leading `-` means an install that keeps the
+# defaults needs no such file.
+EnvironmentFile=-/etc/default/amazon-wishlist
+ExecStart=/opt/amazon-wishlist/.venv/bin/python scripts/bookbub_daily.py --netns wlvpn
+Restart=on-failure
+RestartSec=30
+# Hardening (mirrors amazon-wishlist.service: chromium's multi-process model —
+# zygote / crashpad / shared /tmp sockets — breaks under stricter settings;
+# see the NOTE in that unit).
+NoNewPrivileges=true
+ProtectSystem=false
+PrivateTmp=false
+ReadWritePaths=/opt/amazon-wishlist/data /opt/amazon-wishlist/.cache
+
+[Install]
+WantedBy=multi-user.target

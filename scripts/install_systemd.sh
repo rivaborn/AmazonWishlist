@@ -107,13 +107,25 @@ install -m 644 "$APP_DIR/amazon-wishlist.service" /etc/systemd/system/amazon-wis
 # deploy (the up script also exits 1 with a clear message when its
 # prerequisites are missing; StartLimitBurst bounds the boot-race retries).
 install -m 644 "$APP_DIR/amazon-wishlist-vpn.service" /etc/systemd/system/amazon-wishlist-vpn.service
+# BookBub daily updater (scripts/bookbub_daily.py): a oneshot service that
+# runs inside the wlvpn netns, fired daily at 18:00 local by its timer. The
+# TIMER is the unit that gets enabled; the service's start below is
+# best-effort — a missing BOOKBUB_LOGIN_LINK makes the run exit 2, and that
+# must never block a deploy.
+install -m 644 "$APP_DIR/amazon-wishlist-bookbub.service" /etc/systemd/system/amazon-wishlist-bookbub.service
+install -m 644 "$APP_DIR/amazon-wishlist-bookbub.timer" /etc/systemd/system/amazon-wishlist-bookbub.timer
 systemctl daemon-reload
 systemctl enable amazon-wishlist.service
 systemctl enable amazon-wishlist-vpn.service
+systemctl enable amazon-wishlist-bookbub.timer
 systemctl restart amazon-wishlist.service
 systemctl start amazon-wishlist-vpn.service || true
+systemctl start amazon-wishlist-bookbub.timer || true
+systemctl start amazon-wishlist-bookbub.service || true
 systemctl status --no-pager amazon-wishlist.service || true
 systemctl status --no-pager amazon-wishlist-vpn.service || true
+systemctl status --no-pager amazon-wishlist-bookbub.service || true
+systemctl list-timers --all --no-pager | grep -F bookbub || true
 
 echo
 echo "Installed. Visit http://<host>:9060/"

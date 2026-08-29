@@ -1,0 +1,27 @@
+# Daily trigger for the BookBub deal updater (amazon-wishlist-bookbub.service):
+# fetch + store today's deals, then re-verify every non-expired deal against
+# live Amazon prices. Runs at 18:00 in the SYSTEM LOCAL timezone (systemd
+# OnCalendar uses the system zone unless a timezone is given explicitly).
+#
+# Persistent=true: if the box was down (or systemd stopped) at 18:00, the run
+# fires on next boot instead of being skipped — daily deals are time-bound, so
+# a catch-up run is what we want.
+#
+# Manage with:
+#   systemctl start amazon-wishlist-bookbub.timer     # enable on this boot
+#   systemctl stop  amazon-wishlist-bookbub.timer     # suspend the schedule
+#   systemctl list-timers --all | grep bookbub        # next firing time
+#
+# install_systemd.sh enables this timer on every deploy, so a hand-edit here
+# is reverted.
+
+[Unit]
+Description=Daily 18:00 BookBub deal updater (amazon-wishlist-bookbub.service)
+
+[Timer]
+OnCalendar=*-*-* 18:00:00
+Persistent=true
+Unit=amazon-wishlist-bookbub.service
+
+[Install]
+WantedBy=timers.target
