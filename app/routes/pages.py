@@ -6,7 +6,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
-from .. import config, deals_db, services, sync
+from .. import config, deals_db, services, settings, sync
 from ..pagination import DEFAULT_PER_PAGE, PER_PAGE_MAX, PER_PAGE_MIN, paginate
 
 router = APIRouter()
@@ -174,6 +174,40 @@ def deal_cover(name: str):
     if not path.is_file() or covers_dir not in path.parents:
         raise HTTPException(404, "not found")
     return FileResponse(path)
+
+
+@router.get("/settings")
+def settings_page(request: Request):
+    """App settings (primary only): daily schedule times + BookBub cover size.
+
+    A read-only mirror never sees this tab (the nav link is hidden, and this
+    403s here). Values live in the `settings` table (app.settings) and override
+    the env/config defaults at the point of use (the scheduler's daily times,
+    the BookBub Deals tab's default cover size); mutations go through
+    POST /api/settings (primary-only). Times are server-local HH:MM.
+    """
+    if config.is_secondary():
+        raise HTTPException(
+            403, "settings are edited on the primary; this mirror is read-only"
+        )
+    scrape_h = settings.get_int("scrape_hour", config.SCRAPE_HOUR)
+    scrape_m = settings.get_int("scrape_minute", config.SCRAPE_MINUTE)
+    bookbub_h = settings.get_int("bookbub_hour", config.BOOKBUB_HOUR_DEFAULT)
+    bookbub_m = settings.get_int("bookbub_minute", config.BOOKBUB_MINUTE_DEFAULT)
+    cover_size = settings.get("cover_size", config.BOOKBUB_COVER_SIZE_DEFAULT)
+    return templates.TemplateResponse(
+        request,
+        "settings.html",
+        _ctx(
+            {
+                "scrape_time": f"{scrape_h:02d}:{scrape_m:02d}",
+                "bookbub_time": f"{bookbub_h:02d}:{bookbub_m:02d}",
+                "cover_size": cover_size,
+                "cover_size_options": config.BOOKBUB_COVER_SIZE_OPTIONS,
+                "active": "settings",
+            }
+        ),
+    )
 
 
 @router.get("/books")

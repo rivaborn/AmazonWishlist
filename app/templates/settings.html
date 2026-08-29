@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block title %}Settings{% endblock %}
+{% block content %}
+<h2>Settings</h2>
+<p class="hint">Applies to this instance (the primary) only. Times are server-local. A time change
+  takes effect from the next daily run — no restart needed — and a restart never triggers a
+  BookBub or Grimmory update: both happen only at the scheduled daily times below.</p>
+<form method="post" action="/api/settings" class="add-form">
+  <label>Amazon wishlist scrape starts (daily)
+    <input type="time" name="scrape_time" value="{{ scrape_time }}" required>
+  </label>
+  <label>BookBub daily update (daily)
+    <input type="time" name="bookbub_time" value="{{ bookbub_time }}" required>
+  </label>
+  <label>Book cover size (BookBub Deals tab)
+    <select name="cover_size">
+      {% for opt in cover_size_options %}
+      <option value="{{ opt }}" {{ 'selected' if opt == cover_size else '' }}>{{ opt }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <button type="submit">Save</button>
+</form>
+<p class="hint">The BookBub time runs the whole daily cycle at one time (the same time for all):
+  fetch the day's BookBub deals, update the owned-in-grimmory flags, remove duplicates, and
+  re-verify every non-expired deal against live Amazon prices — through the NordVPN tunnel,
+  which is only connected while that run is in progress. The cover size default also drives the
+  cover-size dropdown on the BookBub Deals tab.</p>
+{% endblock %}

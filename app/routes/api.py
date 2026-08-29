@@ -1,10 +1,11 @@
+import re
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
 from fastapi import APIRouter, Body, Depends, Form, HTTPException
 from fastapi.responses import JSONResponse, RedirectResponse
 
-from .. import config, deals_db, services
+from .. import config, deals_db, services, settings
 
 router = APIRouter(prefix="/api")
 _executor = ThreadPoolExecutor(max_workers=1)
@@ -84,3 +85,65 @@ def set_deal_hidden(row_id: int, body: dict = Body(...)):
     if not ok:
         raise HTTPException(404, f"unknown deal id: {row_id}")
     return {"id": row_id, "hidden": hidden}
+
+
+_TIME_RE = re.compile(r"^(\d{1,2}):(\d{2})$")
+
+
+def _parse_hhmm(value: Optional[str], field: str) -> Optional[tuple[int, int]]:
+    """'HH:MM' -> (hour, minute), or None when the field was not supplied.
+
+    Blank strings count as not supplied (a settings form may omit a field to
+    leave it untouched). Anything supplied but unparseable/out-of-range is a
+    400 — a silent default would silently retime a daily job.
+    """
+    if value is None or not value.strip():
+        return None
+    m = _TIME_RE.match(value.strip())
+    if not m:
+        raise HTTPException(400, f"{field} must be HH:MM")
+    hour, minute = int(m.group(1)), int(m.group(2))
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        raise HTTPException(400, f"{field} must be HH:MM (hour 0-23, minute 0-59)")
+    return (hour, minute)
+
+
+@router.post("/settings", dependencies=[Depends(_require_primary)])
+def save_settings(
+    scrape_time: Optional[str] = Form(None),
+    bookbub_time: Optional[str] = Form(None),
+    cover_size: Optional[str] = Form(None),
+):
+    """Save app settings (the Settings tab) — primary only.
+
+    Any of the three fields may be supplied; only supplied values are written,
+    so the BookBub Deals cover-size dropdown (which POSTs just ``cover_size``)
+    reuses this endpoint. Times are persisted as scrape_hour/scrape_minute and
+    bookbub_hour/bookbub_minute (server local) and take effect from the next
+    daily run via scheduler.reschedule_jobs(); the cover size applies on the
+    next page load. PRG: 303 -> /settings on success (the dropdown ignores the
+    redirect and reloads its own page).
+    """
+    time_changed = False
+    st = _parse_hhmm(scrape_time, "scrape_time")
+    if st is not None:
+        settings.set("scrape_hour", st[0])
+        settings.set("scrape_minute", st[1])
+        time_changed = True
+    bt = _parse_hhmm(bookbub_time, "bookbub_time")
+    if bt is not None:
+        settings.set("bookbub_hour", bt[0])
+        settings.set("bookbub_minute", bt[1])
+        time_changed = True
+    if cover_size is not None and cover_size.strip():
+        cs = cover_size.strip()
+        if cs not in config.BOOKBUB_COVER_SIZE_OPTIONS:
+            raise HTTPException(
+                400, f"cover_size must be one of {config.BOOKBUB_COVER_SIZE_OPTIONS}"
+            )
+        settings.set("cover_size", cs)
+    if time_changed:
+        from .. import scheduler
+
+        scheduler.reschedule_jobs()
+    return RedirectResponse(url="/settings", status_code=303)
