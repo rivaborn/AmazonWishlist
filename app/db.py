@@ -41,6 +41,13 @@ CREATE TABLE IF NOT EXISTS price_snapshot (
 
 CREATE INDEX IF NOT EXISTS idx_snap_asin_time
     ON price_snapshot(asin, observed_at DESC);
+
+-- Runtime settings (the Settings tab): key/value. Primary-only per-instance
+-- config; sync.export_catalog never touches it, so it does not mirror.
+CREATE TABLE IF NOT EXISTS settings (
+    key   TEXT PRIMARY KEY,
+    value TEXT
+);
 """
 
 
@@ -52,6 +59,11 @@ def init_db() -> None:
 
 def _migrate(conn) -> None:
     """In-place upgrades for older databases. Each step is a no-op if already applied."""
+    # The Settings tab's key/value table (new in this revision). Idempotent.
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)"
+    )
+
     cols = {r[1] for r in conn.execute("PRAGMA table_info(wishlist)").fetchall()}
     if "last_scraped_at" not in cols:
         conn.execute("ALTER TABLE wishlist ADD COLUMN last_scraped_at TEXT")

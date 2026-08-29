@@ -243,6 +243,17 @@ DEALS_COVERS_DIR = Path(os.environ.get("DEALS_COVERS_DIR", DATA_DIR / "covers"))
 BOOKBUB_PER_PAGE_OPTIONS = [20, 40, 60, 80, 100]
 BOOKBUB_PER_PAGE_DEFAULT = 20
 
+# BookBub Deals tab cover size (the Settings tab + the per-page cover-size
+# dropdown): the whitelist of size options and the default. The daily BookBub
+# cycle (fetch + owned refresh + dedup) defaults to 18:00 local; the wishlist
+# scrape default remains the SCRAPE_HOUR / SCRAPE_MINUTE env defaults above.
+# These constants are the fallbacks for when the matching setting (the
+# `settings` table via app.settings) has not been stored yet.
+BOOKBUB_COVER_SIZE_OPTIONS = ["1x", "2x", "4x"]
+BOOKBUB_COVER_SIZE_DEFAULT = "1x"
+BOOKBUB_HOUR_DEFAULT = 18
+BOOKBUB_MINUTE_DEFAULT = 0
+
 # Live-deal verification (scripts/verify_deals.py): the deal_status values
 # written into the `deal` table when we check a book's current Amazon price
 # against the stored deal_price. See app.deals_db.classify_deal.
