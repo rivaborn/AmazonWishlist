@@ -142,7 +142,7 @@ def _transient(result: amazon_price.PriceResult) -> bool:
     )
 
 
-def _capture_page_meta(page, asin: str | None) -> tuple:
+def _capture_page_meta(page, asin: str | None, existing_cover: str | None = None) -> tuple:
     """Best-effort capture of the book cover + description for a loaded page.
 
     Extracts the cover URL + description from the rendered HTML (pure
@@ -152,15 +152,23 @@ def _capture_page_meta(page, asin: str | None) -> tuple:
     (block page, missing markup, or a failed download). Never raises: a
     capture miss must never take the run down (the price result is what the
     run depends on).
+
+    No-clobber rule: when the deal already has a cover (``existing_cover``)
+    whose file is present on disk, it is NOT re-downloaded or overwritten —
+    the existing file is kept (saves bandwidth and preserves the existing
+    art); only the description still refreshes from the page.
     """
     try:
         meta = amazon_price.extract_page_meta_html(page.content())
         cover = None
         if meta.get("cover_url"):
-            path = amazon_price.download_cover(
-                meta["cover_url"], DEALS_COVERS_DIR, asin=asin
-            )
-            cover = path.name if path is not None else None
+            if existing_cover and (DEALS_COVERS_DIR / existing_cover).is_file():
+                cover = existing_cover  # keep the existing cover; never overwrite it
+            else:
+                path = amazon_price.download_cover(
+                    meta["cover_url"], DEALS_COVERS_DIR, asin=asin
+                )
+                cover = path.name if path is not None else None
         description = (meta.get("description") or "").strip() or None
         return cover, description
     except Exception as exc:
@@ -180,7 +188,8 @@ def _read_with_retries(
     attempts = 0
     while True:
         result, cover, description = read(
-            deal["amazon_url"], fingerprint=f, asin=deal["asin"]
+            deal["amazon_url"], fingerprint=f, asin=deal["asin"],
+            existing_cover=deal.get("cover"),
         )
         if not _transient(result) or attempts >= VERIFY_MAX_RETRIES:
             return result, cover, description
@@ -325,7 +334,7 @@ def _run(args) -> int:
         pw = sync_playwright().start()
         browser = pw.chromium.launch(headless=True, args=amazon_price.LAUNCH_ARGS)
         try:
-            def read(url, *, fingerprint, asin=None):
+            def read(url, *, fingerprint, asin=None, existing_cover=None):
                 # One context per book: the fingerprint (UA/locale/viewport) is
                 # context-level, so each book gets its own; the browser is shared.
                 ctx = browser.new_context(
@@ -339,8 +348,12 @@ def _run(args) -> int:
                     # Best-effort capture of the cover + description (the
                     # BookBub Deals tab shows the cover by the title and the
                     # description on hover); never raises — a miss leaves
-                    # (None, None) and the price result is untouched.
-                    cover, description = _capture_page_meta(page, asin)
+                    # (None, None) and the price result is untouched. If the
+                    # deal already has a cover file, it is kept (not
+                    # re-downloaded/overwritten) — see _capture_page_meta.
+                    cover, description = _capture_page_meta(
+                        page, asin, existing_cover=existing_cover
+                    )
                     return result, cover, description
                 finally:
                     ctx.close()

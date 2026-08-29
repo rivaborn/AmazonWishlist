@@ -41,6 +41,11 @@ One run does the whole daily cycle:
 Newly-stored deals flow into the BookBub Deals tab automatically as soon as
 they are marked ``current`` (the tab lists ``current_deals``). (requirement 5)
 
+**Once-a-day guard**: the real run claims today's date (YYYYMMDD) in a marker
+file beside the deals DB before doing any work, so the update can never run
+more than once per calendar day — a second invocation the same day (a manual
+re-run, a scheduling mistake, or an automatic restart) is a no-op.
+
 ``--check`` is a dry run: it prints today's date, the BookBub credential
 status (``credentials: set`` / ``no BOOKBUB_USERNAME / BOOKBUB_PASSWORD
 configured`` — never the actual values), and the recheckable (non-expired)
@@ -86,6 +91,40 @@ from app.config import (  # noqa: E402
 )
 
 log = logging.getLogger("bookbub_daily")
+
+
+def _claim_daily_slot(db_path: str, date: str) -> bool:
+    """Once-a-day guard: refuse a second real run in the same calendar day.
+
+    Claims the slot BEFORE any work by writing ``date`` (YYYYMMDD) into a
+    marker file beside the deals DB. A later invocation the same day sees the
+    matching marker and is skipped, so the daily update can never run more
+    than once a day even across a manual re-run, a scheduling mistake, or an
+    automatic restart. Returns True when this invocation may proceed (it
+    claimed the slot) and False when the day is already claimed. Best-effort:
+    a marker read/write failure is logged as a warning and ignored (the data
+    dir beside ``DEALS_DB`` is normally writable by the service user).
+    """
+    marker = Path(db_path).resolve().parent / "bookbub_daily.last_run"
+    try:
+        if marker.exists() and (marker.read_text().strip() or "") == date:
+            log.warning(
+                "once-a-day guard: the daily update already ran for %s (marker %s); "
+                "skipping this invocation — it must never run more than once a day.",
+                date, marker,
+            )
+            return False
+    except OSError as exc:
+        log.warning("once-a-day guard: could not read marker %s (%s); proceeding.",
+                    marker, exc)
+    try:
+        marker.write_text(date)
+    except OSError as exc:
+        log.warning(
+            "once-a-day guard: could not write marker %s (%s); cannot enforce the "
+            "once-a-day rule for this run.", marker, exc,
+        )
+    return True
 
 
 def main() -> int:
@@ -142,6 +181,13 @@ def main() -> int:
             "fetched and the deals DB was left untouched."
         )
         return 2
+
+    # (0) Once-a-day guard: the daily update never runs more than once per
+    #     calendar day. Claim today's slot before any network/DB work; a
+    #     second invocation the same day (manual re-run, a scheduling
+    #     mistake, or an automatic restart) is a no-op.
+    if not _claim_daily_slot(args.db, date):
+        return 0
 
     # (1) Fetch + store today's deals. A fetch failure (wrong/expired
     #     credentials, Cloudflare block, or a genuinely empty day) is logged,

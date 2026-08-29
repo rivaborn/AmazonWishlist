@@ -381,11 +381,11 @@ def pending_deals(conn: sqlite3.Connection, limit: int | None = None) -> list[di
     ``limit`` caps the number of dicts returned (after the ASIN filter).
     """
     rows = conn.execute(
-        "SELECT id, amazon_url, deal_price, title FROM deal "
+        "SELECT id, amazon_url, deal_price, title, cover FROM deal "
         "WHERE deal_status IS NULL AND amazon_url IS NOT NULL ORDER BY id"
     ).fetchall()
     out: list[dict] = []
-    for row_id, url, deal_price, title in rows:
+    for row_id, url, deal_price, title, cover in rows:
         asin = asin_from_amazon_url(url)
         if asin:
             out.append(
@@ -395,6 +395,7 @@ def pending_deals(conn: sqlite3.Connection, limit: int | None = None) -> list[di
                     "amazon_url": url,
                     "deal_price": deal_price,
                     "title": title,
+                    "cover": cover,
                 }
             )
             if limit is not None and len(out) >= limit:
@@ -429,13 +430,13 @@ def recheck_deals(conn: sqlite3.Connection, limit: int | None = None) -> list[di
     the ASIN filter.
     """
     rows = conn.execute(
-        "SELECT id, amazon_url, deal_price, title FROM deal "
+        "SELECT id, amazon_url, deal_price, title, cover FROM deal "
         "WHERE (deal_status IS NULL OR deal_status IN (?, ?)) "
         "AND amazon_url IS NOT NULL ORDER BY id",
         (DEAL_STATUS_CURRENT, DEAL_STATUS_UNKNOWN),
     ).fetchall()
     out: list[dict] = []
-    for row_id, url, deal_price, title in rows:
+    for row_id, url, deal_price, title, cover in rows:
         asin = asin_from_amazon_url(url)
         if asin:
             out.append(
@@ -445,6 +446,7 @@ def recheck_deals(conn: sqlite3.Connection, limit: int | None = None) -> list[di
                     "amazon_url": url,
                     "deal_price": deal_price,
                     "title": title,
+                    "cover": cover,
                 }
             )
             if limit is not None and len(out) >= limit:
