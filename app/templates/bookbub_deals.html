@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block title %}BookBub Deals{% endblock %}
+{% block content %}
+<h2>BookBub Deals</h2>
+<p class="hint">BookBub deals verified live on Amazon right now. Expired and unverified deals are not shown.</p>
+
+{% if not rows %}
+  <p class="empty">No current BookBub deals. Verify the deals in data/deals.db (scripts/verify_deals.py) and try again.</p>
+{% else %}
+{% with pager=pagination %}{% include "_pagination.html" %}{% endwith %}
+<table>
+  <thead>
+    <tr>
+      <th>Title</th><th>Author</th><th>Deal price</th><th>Regular price</th><th>Date of Deal</th>
+    </tr>
+  </thead>
+  <tbody>
+  {% for r in rows %}
+    <tr>
+      <td><a href="{{ r.amazon_url }}" target="_blank" rel="noopener">{{ r.title }}</a></td>
+      <td>{{ r.author or '' }}</td>
+      <td>{{ r.deal_price or '—' }}</td>
+      <td>{{ r.original_price or '—' }}</td>
+      <td class="ts">{{ r.date }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% with pager=pagination %}{% include "_pagination.html" %}{% endwith %}
+{% endif %}
+{% endblock %}

@@ -6,7 +6,7 @@ from fastapi import APIRouter, Query, Request
 from fastapi.responses import RedirectResponse
 from fastapi.templating import Jinja2Templates
 
-from .. import config, services, sync
+from .. import config, deals_db, services, sync
 from ..pagination import DEFAULT_PER_PAGE, PER_PAGE_MAX, PER_PAGE_MIN, paginate
 
 router = APIRouter()
@@ -73,6 +73,41 @@ def deals_page(
             "basis": b,
             "active": "deals",
         }),
+    )
+
+
+@router.get("/bookbub-deals")
+def bookbub_deals_page(
+    request: Request,
+    page: int = Query(1, ge=1),
+    per_page: int = Query(DEFAULT_PER_PAGE),
+):
+    """Live BookBub deals (data/deals.db, deal_status='current').
+
+    Read-only on both instances — deals.db is never synced or mutated by the
+    web app, so the mirror is safe to serve it. The tab shows only verified
+    live deals (expired/unknown/unchecked rows are filtered in the query,
+    see deals_db.current_deals).
+    """
+    conn = deals_db.connect(config.DEALS_DB)
+    try:
+        deals_db.ensure_schema(conn)  # idempotent (adds verification cols if missing)
+        rows = deals_db.current_deals(conn)
+    finally:
+        conn.close()
+    pagination = paginate(
+        rows, page=page, per_page=_per_page(per_page), base_url="/bookbub-deals"
+    )
+    return templates.TemplateResponse(
+        request,
+        "bookbub_deals.html",
+        _ctx(
+            {
+                "rows": pagination["rows"],
+                "pagination": pagination,
+                "active": "bookbub",
+            }
+        ),
     )
 
 
