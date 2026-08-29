@@ -8,10 +8,19 @@
   <p class="empty">No current BookBub deals. Verify the deals in data/deals.db (scripts/verify_deals.py) and try again.</p>
 {% else %}
 {% with pager=pagination %}{% include "_pagination.html" %}{% endwith %}
+{# Clickable sort headers: clicking the active column toggles its direction;
+   clicking the other switches to it with its default (price ascending =
+   cheapest first, date descending = most recent first). Arrows show the
+   current sort state on the active column. #}
+{% set price_next = 'desc' if (sort == 'price' and dir == 'asc') else 'asc' %}
+{% set date_next = 'asc' if (sort == 'date' and dir == 'desc') else 'desc' %}
 <table>
   <thead>
     <tr>
-      <th>Title</th><th>Author</th><th>Deal price</th><th>Regular price</th><th>Date of Deal</th>
+      <th>Title</th><th>Author</th>
+      <th><a href="/bookbub-deals?sort=price&dir={{ price_next }}" class="{{ 'sort-active' if sort == 'price' }}">Deal price{% if sort == 'price' %} {{ '▲' if dir == 'asc' else '▼' }}{% endif %}</a></th>
+      <th>Regular price</th>
+      <th><a href="/bookbub-deals?sort=date&dir={{ date_next }}" class="{{ 'sort-active' if sort == 'date' }}">Date of Deal{% if sort == 'date' %} {{ '▲' if dir == 'asc' else '▼' }}{% endif %}</a></th>
     </tr>
   </thead>
   <tbody>
