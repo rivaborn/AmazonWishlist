@@ -47,6 +47,7 @@ __all__ = [
     "parse_price_cents",
     "classify_deal",
     "current_deals",
+    "sort_deals",
 ]
 
 # --------------------------------------------------------------------------- #
@@ -377,8 +378,9 @@ def _format_deal_date(date: str | None) -> str:
 def current_deals(conn: sqlite3.Connection) -> list[dict]:
     """Live BookBub deals for the web app's BookBub Deals tab.
 
-    Returns ``{id, title, author, date, deal_price, original_price,
-    amazon_url}`` dicts for every row the app presents as an in-flight deal:
+    Returns ``{id, title, author, date, deal_price, deal_price_cents,
+    original_price, amazon_url}`` dicts for every row the app presents as an
+    in-flight deal:
     ``deal_status`` is ``current`` (verified live on Amazon), ``amazon_url``
     is present (the tab links the title to Amazon), and the book is **not**
     owned in Grimmory (``owned_in_grimmory`` is 0 or NULL/unknown — avoid
@@ -386,7 +388,9 @@ def current_deals(conn: sqlite3.Connection) -> list[dict]:
     (``date DESC, id DESC``); ``date`` is reformatted from ``YYYYMMDD`` to
     ``YYYY-MM-DD`` for display. This excludes expired deals, ``unknown``
     deals (unreadable — treated as unverified), unchecked deals
-    (``deal_status`` NULL), and books already owned.
+    (``deal_status`` NULL), and books already owned. ``deal_price_cents`` is
+    the numeric value of ``deal_price`` in cents (``None`` when unparseable,
+    ``Free!`` → 0); it exists so price sorting is numeric, not textual.
     """
     rows = conn.execute(
         "SELECT id, date, title, author, deal_price, original_price, amazon_url "
@@ -404,11 +408,34 @@ def current_deals(conn: sqlite3.Connection) -> list[dict]:
                 "author": author,
                 "date": _format_deal_date(date),
                 "deal_price": deal_price,
+                "deal_price_cents": parse_price_cents(deal_price),
                 "original_price": original_price,
                 "amazon_url": amazon_url,
             }
         )
     return out
+
+
+def sort_deals(rows: list[dict], sort: str = "date", direction: str = "desc") -> list[dict]:
+    """Return a NEW list of ``current_deals`` dicts ordered for the web tab.
+
+    ``sort`` is ``"date"`` (the ``YYYY-MM-DD`` ``date`` string, lexicographic =
+    chronological) or ``"price"`` (the numeric ``deal_price_cents``). ``direction``
+    is ``"asc"`` or ``"desc"``. For ``price`` sorting, rows whose
+    ``deal_price_cents`` is None (an unparseable deal price) are always placed
+    last, regardless of direction. A new list is returned; the caller's list
+    and its dicts are never mutated. Unknown ``sort`` values fall back to
+    ``date``.
+    """
+    ordered = list(rows)  # shallow copy — reorder, never touch the input order
+    if sort == "price":
+        with_cents = [r for r in ordered if r.get("deal_price_cents") is not None]
+        no_cents = [r for r in ordered if r.get("deal_price_cents") is None]
+        with_cents.sort(key=lambda r: r["deal_price_cents"], reverse=(direction == "desc"))
+        return with_cents + no_cents
+    # sort == "date" (default fallback)
+    ordered.sort(key=lambda r: (r.get("date") or ""), reverse=(direction == "desc"))
+    return ordered
 
 
 def classify_deal(deal_price: str | None, current_price: str | None) -> tuple[str, int | None]:
