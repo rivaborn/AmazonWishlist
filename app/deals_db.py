@@ -48,6 +48,7 @@ __all__ = [
     "classify_deal",
     "current_deals",
     "sort_deals",
+    "set_hidden",
 ]
 
 # --------------------------------------------------------------------------- #
@@ -68,7 +69,8 @@ CREATE TABLE IF NOT EXISTS deal (
     audited_at         TEXT,
     deal_status        TEXT,                                   -- NULL=unchecked, else current|expired|unknown
     current_price      TEXT,                                   -- last read Amazon price text
-    verified_at        TEXT                                     -- ISO time of the last live check
+    verified_at        TEXT,                                   -- ISO time of the last live check
+    hidden             INTEGER NOT NULL DEFAULT 0              -- 1 when the user hid it from the BookBub Deals tab
 );
 CREATE UNIQUE INDEX IF NOT EXISTS uq_deal_date_bub ON deal(date, bookbub_url);
 """
@@ -90,6 +92,8 @@ def _migrate(conn: sqlite3.Connection) -> None:
     for col in ("deal_status", "current_price", "verified_at"):
         if col not in cols:
             conn.execute(f"ALTER TABLE deal ADD COLUMN {col} TEXT")
+    if "hidden" not in cols:
+        conn.execute("ALTER TABLE deal ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0")
 
 
 def connect(path: str | Path) -> sqlite3.Connection:
@@ -375,12 +379,12 @@ def _format_deal_date(date: str | None) -> str:
     return date or ""
 
 
-def current_deals(conn: sqlite3.Connection) -> list[dict]:
+def current_deals(conn: sqlite3.Connection, show_hidden: bool = False) -> list[dict]:
     """Live BookBub deals for the web app's BookBub Deals tab.
 
     Returns ``{id, title, author, date, deal_price, deal_price_cents,
-    original_price, amazon_url}`` dicts for every row the app presents as an
-    in-flight deal:
+    original_price, amazon_url, hidden}`` dicts for every row the app
+    presents as an in-flight deal:
     ``deal_status`` is ``current`` (verified live on Amazon), ``amazon_url``
     is present (the tab links the title to Amazon), and the book is **not**
     owned in Grimmory (``owned_in_grimmory`` is 0 or NULL/unknown — avoid
@@ -391,16 +395,20 @@ def current_deals(conn: sqlite3.Connection) -> list[dict]:
     (``deal_status`` NULL), and books already owned. ``deal_price_cents`` is
     the numeric value of ``deal_price`` in cents (``None`` when unparseable,
     ``Free!`` → 0); it exists so price sorting is numeric, not textual.
+    Rows the user hid (``hidden`` = 1) are excluded unless ``show_hidden``
+    is true; the ``hidden`` flag is also returned in each dict so the UI can
+    render the per-row hide checkbox.
     """
     rows = conn.execute(
-        "SELECT id, date, title, author, deal_price, original_price, amazon_url "
+        "SELECT id, date, title, author, deal_price, original_price, amazon_url, hidden "
         "FROM deal WHERE deal_status = ? AND amazon_url IS NOT NULL "
         "AND owned_in_grimmory IS NOT 1 "
+        "AND (hidden = 0 OR ? = 1) "
         "ORDER BY date DESC, id DESC",
-        (DEAL_STATUS_CURRENT,),
+        (DEAL_STATUS_CURRENT, int(show_hidden)),
     ).fetchall()
     out: list[dict] = []
-    for row_id, date, title, author, deal_price, original_price, amazon_url in rows:
+    for row_id, date, title, author, deal_price, original_price, amazon_url, hidden in rows:
         out.append(
             {
                 "id": row_id,
@@ -411,9 +419,23 @@ def current_deals(conn: sqlite3.Connection) -> list[dict]:
                 "deal_price_cents": parse_price_cents(deal_price),
                 "original_price": original_price,
                 "amazon_url": amazon_url,
+                "hidden": hidden,
             }
         )
     return out
+
+
+def set_hidden(conn: sqlite3.Connection, row_id: int, hidden: bool) -> bool:
+    """Set or clear a deal row's hidden flag (the caller commits).
+
+    Returns True when the row existed and was updated, False when the id is
+    unknown (so the caller can answer 404).
+    """
+    cur = conn.execute(
+        "UPDATE deal SET hidden = ? WHERE id = ?",
+        (1 if hidden else 0, row_id),
+    )
+    return cur.rowcount > 0
 
 
 def sort_deals(rows: list[dict], sort: str = "date", direction: str = "desc") -> list[dict]:
