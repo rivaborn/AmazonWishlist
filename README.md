@@ -120,7 +120,7 @@ Set in `amazon-wishlist.service` under `Environment=` if you need to override.
 ## Pages
 
 - **/deals** — books on a wishlist whose latest snapshot is below baseline by ≥ filters. Filter by minimum dollar drop, minimum percent drop, and basis (vs. previous observed price or vs. list/strikethrough price).
-- **/bookbub-deals** — the BookBub Deals tab: BookBub deals currently verified live on Amazon (see "Verifying deals are still live" below). Each row shows Title (a link that opens the Amazon product page in a new tab), Author, Deal price, Regular price, and Date of Deal. Its source is `data/deals.db` (`DEALS_DB`): only rows with `deal_status = 'current'` and an `amazon_url` are listed — expired, unverified (NULL status), and unreadable (`unknown`) deals are omitted. The **Deal price** and **Date of Deal** columns are clickable sort headers: clicking one cycles ascending/descending, and clicking a non-active column switches to it with its default (price ascending = cheapest first, date descending = most recent first); the default order is Date of Deal descending (most recent first). The URL query params are `sort=price` or `sort=date` and `dir=asc` or `dir=desc`, preserved across pagination. Read-only on both instances.
+- **/bookbub-deals** — the BookBub Deals tab: BookBub deals currently verified live on Amazon (see "Verifying deals are still live" below). Each row shows Title (a link that opens the Amazon product page in a new tab), Author, Deal price, Regular price, and Date of Deal. Its source is `data/deals.db` (`DEALS_DB`): only rows with `deal_status = 'current'` and an `amazon_url` are listed — expired, unverified (NULL status), and unreadable (`unknown`) deals are omitted. The **Deal price** and **Date of Deal** columns are clickable sort headers: clicking one cycles ascending/descending, and clicking a non-active column switches to it with its default (price ascending = cheapest first, date descending = most recent first); the default order is Date of Deal descending (most recent first). The URL query params are `sort=price` or `sort=date` and `dir=asc` or `dir=desc`, preserved across pagination. Each row has a **Hide** checkbox (leading column) that hides that book from the tab; it persists to the DB via `POST /api/deals/{id}/hidden` (`deal.hidden`), and the **Show Hidden** checkbox at the top reveals hidden deals (`?show_hidden=1`). Read-only on both instances (the hide toggle is primary-only, like the purchased flag).
 - **/books** — every available book across all wishlists, sorted by current price ascending. Header shows total count, lowest, and highest.
 - **/no-price** — split into "Kindle edition unavailable" and "Removed from Amazon" (HTTP 404).
 - **/price-drops** — every historical snapshot that dropped vs. its baseline, filtered.
@@ -483,6 +483,28 @@ python scripts/verify_deals.py --netns wlvpn …   # Ubuntu: run INSIDE the wlvp
 - **Anti-bot pacing and retries**: per-book reads are spaced by a random jitter (`VERIFY_DELAY_MIN`–`VERIFY_DELAY_MAX` seconds, the same idea as the wishlist scraper's pacing); a blocked page, failed navigation, or no-price result is retried with backoff (`VERIFY_RETRY_BACKOFF` × up to `VERIFY_MAX_RETRIES`) before the book is recorded `unknown`. Blocked/ambiguous pages are dumped to `data/diagnostics/` for selector debugging.
 
 The NordVPN account is read **only** from the `NORDVPN_USERNAME` / `NORDVPN_PASSWORD` environment variables (or `--nord-user` / `--nord-pass`) — never from a committed file. The starting exit country defaults to the first entry of `NORDVPN_COUNTRIES` (`NORDVPN_START_COUNTRY`); the CLI itself is `nordvpn` on `PATH` (overridable via `NORDVPN_CLI`), and `python -m app.nordvpn` is a standalone probe (`--login` / `--rotate` / `--connect COUNTRY [CITY]`). That host-CLI path is for dev boxes; the Ubuntu deployment uses the netns tunnel below instead.
+
+### Daily BookBub updater (18:00 local, every day)
+
+`scripts/bookbub_daily.py` runs the whole daily cycle in one pass:
+
+```bash
+python scripts/bookbub_daily.py --check                       # dry run: date, link status, recheckable count
+python scripts/bookbub_daily.py [--date YYYYMMDD] [--link L]  # manual run (dev box)
+# Ubuntu: runs automatically via the systemd units below; manually:
+#   systemctl start amazon-wishlist-bookbub.service
+#   journalctl -u amazon-wishlist-bookbub -f
+```
+
+1. **Fetch + store** — pulls the day's BookBub daily deals (`bookbub.fetch_daily_deals`: login via the daily email's outbound link, Playwright clears the Cloudflare challenge) and upserts them into `data/deals.db` via `deals_db.store_deals` — idempotent per date, computes `owned_in_grimmory` from `data/grimmory.db` (books you own never show on the tab) and sets `no_amazon_link`.
+2. **Re-verify** — then runs `scripts/verify_deals.py --recheck` (the tunnel/fingerprint/pacing loop above) over every deal that is **not yet** `expired` — i.e. `current`, `unknown`, and unchecked — re-reading each against its live Amazon price. `expired` is terminal and is **never re-checked**; deals that come back `current` flow into the BookBub Deals tab automatically.
+
+**Scheduling (Ubuntu)**: `amazon-wishlist-bookbub.timer` fires `amazon-wishlist-bookbub.service` at **18:00 local time** daily (`OnCalendar=*-*-* 18:00:00`, `Persistent=true` so a missed run fires on next boot). The service runs the updater **inside the `wlvpn` tunnel namespace** (`BindsTo=amazon-wishlist-vpn.service`), so the re-verify's Amazon reads egress only through NordVPN — the same fail-closed guarantee as the one-shot verify unit. `install_systemd.sh` installs and enables the timer on every deploy and best-effort starts the service once (a missing login link must never block a deploy).
+
+**Prerequisites**:
+- `BOOKBUB_LOGIN_LINK` in `/etc/default/amazon-wishlist` — the outbound link from the daily BookBub email (a per-day rotating token). A **missing** link exits the run **2** with a clear message (nothing fetched, DB untouched); a **stale/expired** link fails the fetch (logged, exit 1) but the re-verify step still runs. The operator refreshes the link when BookBub rotates it.
+- `data/grimmory.db` (`GRIMMORY_DB`) must be present for owned detection; without it, `owned_in_grimmory` stays NULL (unavailable) and those deals still show.
+- `--check` is a dry run: it prints the date, the login-link status, and the recheckable (non-expired) deal count read straight from the DB — no network, browser, or tunnel.
 
 ### The wlvpn NordVPN tunnel (Ubuntu deployment)
 
