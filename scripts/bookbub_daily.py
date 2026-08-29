@@ -9,8 +9,9 @@ live-deal verifier).
 One run does the whole daily cycle:
 
 1. **Fetch + store** — pull the day's BookBub ebook deals
-   (``bookbub.fetch_daily_deals``: login via the daily email's outbound link,
-   Playwright clears the Cloudflare managed challenge) and upsert them into
+   (``bookbub.fetch_daily_deals``: logs into the BookBub account with
+   ``BOOKBUB_USERNAME`` / ``BOOKBUB_PASSWORD``, Playwright clears the
+   Cloudflare managed challenge) and upsert them into
    ``DEALS_DB`` via ``deals_db.store_deals``. The upsert is idempotent on
    ``(date, bookbub_url)`` and computes ``owned_in_grimmory`` against
    ``GRIMMORY_DB`` and sets ``no_amazon_link``. (requirements 3 + 4)
@@ -24,25 +25,29 @@ One run does the whole daily cycle:
 Newly-stored deals flow into the BookBub Deals tab automatically as soon as
 they are marked ``current`` (the tab lists ``current_deals``). (requirement 5)
 
-``--check`` is a dry run: it prints today's date, whether a BookBub login link
-is set, and the recheckable (non-expired) deal count read straight from the
-DB. It touches no network, browser, or tunnel.
+``--check`` is a dry run: it prints today's date, the BookBub credential
+status (``credentials: set`` / ``no BOOKBUB_USERNAME / BOOKBUB_PASSWORD
+configured`` — never the actual values), and the recheckable (non-expired)
+deal count read straight from the DB. It touches no network, browser, or
+tunnel.
 
-Login-link prerequisite: ``BOOKBUB_LOGIN_LINK`` (or ``--link``) is a per-day
-rotating token from the daily BookBub email. When it is ABSENT the real run
-exits 2 with a clear message and changes nothing; a stale/expired link makes
-the fetch fail (logged) but the re-verify step still runs, and the overall
-exit code is 1 so the operator notices. A missing ``data/grimmory.db`` leaves
-the owned flag NULL (such deals still show).
+Credentials prerequisite: ``BOOKBUB_USERNAME`` / ``BOOKBUB_PASSWORD`` (the
+BookBub account, read from the environment — on the host via
+``/etc/default/amazon-wishlist``; never committed). When they are ABSENT the
+real run exits 2 with a clear message and changes nothing; wrong/expired
+credentials make the fetch fail (logged) but the re-verify step still runs,
+and the overall exit code is 1 so the operator notices. A missing
+``data/grimmory.db`` leaves the owned flag NULL (such deals still show).
 
 Usage (from the repo root):
     python scripts/bookbub_daily.py --check
-    BOOKBUB_LOGIN_LINK='<today's outbound link>' python scripts/bookbub_daily.py
+    BOOKBUB_USERNAME='<you>@bookbub.com' BOOKBUB_PASSWORD='<secret>' \
+        python scripts/bookbub_daily.py
     # Ubuntu tunnel mode (run inside the namespace via the systemd unit):
     python scripts/bookbub_daily.py --netns wlvpn
 
 Exit codes: 0 = success (and a clean --check); 1 = fetch failed or the verify
-pass failed; 2 = no BookBub login link (real run only).
+pass failed; 2 = no BookBub credentials (real run only).
 """
 
 import argparse
@@ -57,7 +62,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app import bookbub, deals_db  # noqa: E402
 from app.config import (  # noqa: E402
-    BOOKBUB_LOGIN_LINK,
+    BOOKBUB_PASSWORD,
+    BOOKBUB_USERNAME,
     DEALS_DB,
     GRIMMORY_DB,
     NORDVPN_ROTATE_EVERY,
@@ -75,8 +81,6 @@ def main() -> int:
                     help=f"Deals DB path (default: {DEALS_DB}).")
     ap.add_argument("--date", default=None,
                     help="Day to pull, YYYYMMDD (default: today).")
-    ap.add_argument("--link", default=None,
-                    help="BookBub outbound auto-login link (else BOOKBUB_LOGIN_LINK env).")
     ap.add_argument("--netns", default="", metavar="NS",
                     help="Tunnel mode for the verify pass: run INSIDE the given network "
                          "namespace (e.g. 'wlvpn'). Forwarded to verify_deals.py.")
@@ -86,7 +90,7 @@ def main() -> int:
     ap.add_argument("--limit", type=int, default=None,
                     help="Forwarded to verify_deals.py: verify at most N deals.")
     ap.add_argument("--check", action="store_true",
-                    help="Dry run: print the date, login-link status, and the "
+                    help="Dry run: print the date, credential status, and the "
                          "recheckable deal count from the DB. No network/browser/tunnel.")
     args = ap.parse_args()
     if args.rotate_every < 1:
@@ -95,7 +99,7 @@ def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
     date = bookbub._normalise_date(args.date)
-    link = args.link or BOOKBUB_LOGIN_LINK
+    creds = bool(BOOKBUB_USERNAME and BOOKBUB_PASSWORD)
 
     # --check: dry run. Reads only the DB; no network, browser, or tunnel.
     if args.check:
@@ -107,27 +111,31 @@ def main() -> int:
                 n = len(deals_db.recheck_deals(conn, limit=args.limit))
             finally:
                 conn.close()
-        link_state = "set" if link else "no BOOKBUB_LOGIN_LINK set"
-        print(f"check: date {date} | {link_state} | {n} recheckable (non-expired) "
+        cred_state = ("credentials: set"
+                      if creds else "no BOOKBUB_USERNAME / BOOKBUB_PASSWORD configured")
+        print(f"check: date {date} | {cred_state} | {n} recheckable (non-expired) "
               f"deal(s) with an ASIN in {args.db} | netns {args.netns or '(host CLI)'}")
         return 0
 
-    # Real run: the login link is a hard prerequisite.
-    if not link:
+    # Real run: the account credentials are a hard prerequisite (checked before
+    # any DB/browser/network work).
+    if not creds:
         log.error(
-            "no BookBub login link: set BOOKBUB_LOGIN_LINK (today's outbound link "
-            "from the daily BookBub email) or pass --link. Exiting 2; nothing "
+            "no BookBub credentials: set BOOKBUB_USERNAME / BOOKBUB_PASSWORD "
+            "(on the host: /etc/default/amazon-wishlist). Exiting 2; nothing "
             "fetched and the deals DB was left untouched."
         )
         return 2
 
-    # (1) Fetch + store today's deals. A fetch failure (stale/expired link,
-    #     Cloudflare block, or a genuinely empty day) is logged, not fatal to
-    #     the re-verify step; it just makes the overall exit code 1.
+    # (1) Fetch + store today's deals. A fetch failure (wrong/expired
+    #     credentials, Cloudflare block, or a genuinely empty day) is logged,
+    #     not fatal to the re-verify step; it just makes the overall exit code 1.
     fetch_failed = False
     deals = []
     try:
-        deals = bookbub.fetch_daily_deals(date, link=link)
+        deals = bookbub.fetch_daily_deals(
+            date, username=BOOKBUB_USERNAME, password=BOOKBUB_PASSWORD
+        )
         log.info("fetched %d deal(s) for %s", len(deals), date)
     except bookbub.BookbubError as e:
         fetch_failed = True
@@ -165,8 +173,9 @@ def main() -> int:
         log.error("verify pass exited %d for %s", verify_rc, date)
         return verify_rc
     # fetch failed but verify succeeded: report the fetch problem (exit 1).
-    log.error("fetch failed for %s (link stale/expired or empty day); verify ran. "
-              "Refreshing BOOKBUB_LOGIN_LINK will fix the fetch.", date)
+    log.error("fetch failed for %s (credentials wrong/expired or empty day); "
+              "verify ran. Checking BOOKBUB_USERNAME / BOOKBUB_PASSWORD will fix "
+              "the fetch.", date)
     return 1
 
 
