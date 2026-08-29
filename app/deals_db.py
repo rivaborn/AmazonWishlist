@@ -50,6 +50,7 @@ __all__ = [
     "sort_deals",
     "set_hidden",
     "recheck_deals",
+    "update_cover_desc",
 ]
 
 # --------------------------------------------------------------------------- #
@@ -71,7 +72,9 @@ CREATE TABLE IF NOT EXISTS deal (
     deal_status        TEXT,                                   -- NULL=unchecked, else current|expired|unknown
     current_price      TEXT,                                   -- last read Amazon price text
     verified_at        TEXT,                                   -- ISO time of the last live check
-    hidden             INTEGER NOT NULL DEFAULT 0              -- 1 when the user hid it from the BookBub Deals tab
+    hidden             INTEGER NOT NULL DEFAULT 0,             -- 1 when the user hid it from the BookBub Deals tab
+    cover              TEXT,                                   -- book cover filename in data/covers/ (NULL when never captured)
+    description        TEXT                                    -- Amazon book description captured during verification (NULL when never captured)
 );
 CREATE UNIQUE INDEX IF NOT EXISTS uq_deal_date_bub ON deal(date, bookbub_url);
 """
@@ -90,7 +93,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
     on a fresh DB (where the columns come from SCHEMA_SQL) or an existing one.
     """
     cols = {r[1] for r in conn.execute("PRAGMA table_info(deal)").fetchall()}
-    for col in ("deal_status", "current_price", "verified_at"):
+    for col in ("deal_status", "current_price", "verified_at", "cover", "description"):
         if col not in cols:
             conn.execute(f"ALTER TABLE deal ADD COLUMN {col} TEXT")
     if "hidden" not in cols:
@@ -415,11 +418,31 @@ def _format_deal_date(date: str | None) -> str:
     return date or ""
 
 
+def update_cover_desc(
+    conn: sqlite3.Connection,
+    row_id: int,
+    cover: str | None,
+    description: str | None,
+) -> None:
+    """Persist the captured book cover filename + Amazon description for a row
+    (the caller commits).
+
+    ``cover`` is the filename under ``data/covers/`` (``None`` when nothing was
+    captured); ``description`` is the captured description text (``None`` when
+    absent from the page). Called from the verification loop — best-effort, so
+    it never raises for missing/short values.
+    """
+    conn.execute(
+        "UPDATE deal SET cover = ?, description = ? WHERE id = ?",
+        (cover or None, description or None, row_id),
+    )
+
+
 def current_deals(conn: sqlite3.Connection, show_hidden: bool = False) -> list[dict]:
     """Live BookBub deals for the web app's BookBub Deals tab.
 
     Returns ``{id, title, author, date, deal_price, deal_price_cents,
-    original_price, amazon_url, hidden}`` dicts for every row the app
+    original_price, amazon_url, hidden, cover, description}`` dicts for every row the app
     presents as an in-flight deal:
     ``deal_status`` is ``current`` (verified live on Amazon), ``amazon_url``
     is present (the tab links the title to Amazon), and the book is **not**
@@ -433,10 +456,14 @@ def current_deals(conn: sqlite3.Connection, show_hidden: bool = False) -> list[d
     ``Free!`` → 0); it exists so price sorting is numeric, not textual.
     Rows the user hid (``hidden`` = 1) are excluded unless ``show_hidden``
     is true; the ``hidden`` flag is also returned in each dict so the UI can
-    render the per-row hide checkbox.
+    render the per-row hide checkbox. ``cover`` is the captured cover image
+    filename (``data/covers/``; None when never captured) and ``description``
+    the captured Amazon description text (shown as a hover tooltip), both
+    None when the page has never been verified.
     """
     rows = conn.execute(
-        "SELECT id, date, title, author, deal_price, original_price, amazon_url, hidden "
+        "SELECT id, date, title, author, deal_price, original_price, amazon_url, "
+        "hidden, cover, description "
         "FROM deal WHERE deal_status = ? AND amazon_url IS NOT NULL "
         "AND owned_in_grimmory IS NOT 1 "
         "AND (hidden = 0 OR ? = 1) "
@@ -444,7 +471,7 @@ def current_deals(conn: sqlite3.Connection, show_hidden: bool = False) -> list[d
         (DEAL_STATUS_CURRENT, int(show_hidden)),
     ).fetchall()
     out: list[dict] = []
-    for row_id, date, title, author, deal_price, original_price, amazon_url, hidden in rows:
+    for row_id, date, title, author, deal_price, original_price, amazon_url, hidden, cover, description in rows:
         out.append(
             {
                 "id": row_id,
@@ -456,6 +483,8 @@ def current_deals(conn: sqlite3.Connection, show_hidden: bool = False) -> list[d
                 "original_price": original_price,
                 "amazon_url": amazon_url,
                 "hidden": hidden,
+                "cover": cover,
+                "description": description,
             }
         )
     return out
