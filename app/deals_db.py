@@ -37,6 +37,7 @@ __all__ = [
     "connect",
     "normalise",
     "owned_lookup",
+    "refresh_owned",
     "upsert_deals",
     "store_deals",
     "book_identity",
@@ -155,6 +156,46 @@ def owned_lookup(deals, grimmory_path: str | Path) -> dict:
     for d in deals:
         result[d.url] = 1 if (normalise(d.title), normalise(d.author)) in owned_pairs else 0
     return result
+
+
+def refresh_owned(conn: sqlite3.Connection, grimmory_path: str | Path) -> int:
+    """Recompute ``owned_in_grimmory`` for EVERY deal row (the caller commits).
+
+    Reads each row's ``(id, bookbub_url, title, author)`` and re-derives
+    ``owned_in_grimmory`` against ``grimmory.db`` via :func:`owned_lookup`
+    (the same normalised title+author matching the upsert uses), so ownership
+    stays current for rows that were stored before the book was added to the
+    library. When ``grimmory.db`` is absent every flag is set to NULL
+    (ownership unknown) rather than left stale — the tab still shows such
+    deals (``owned_in_grimmory IS NOT 1``). Returns the number of rows written
+    (all of them); the caller commits.
+
+    Used by the daily updater (``scripts/bookbub_daily.py``): ``store_deals``
+    only computes ownership for the date it just (re)stores, so re-applying
+    against the local ``grimmory.db`` file each run keeps the flag fresh
+    without calling the Grimmory API (the updater runs in the wlvpn netns,
+    where the Grimmory server is not reachable).
+    """
+    import types
+
+    rows = conn.execute(
+        "SELECT id, bookbub_url, title, author FROM deal"
+    ).fetchall()
+    if not rows:
+        return 0
+    deal_objs = [
+        types.SimpleNamespace(url=r[1], title=r[2], author=r[3]) for r in rows
+    ]
+    owned_map = owned_lookup(deal_objs, grimmory_path)
+    n = 0
+    for r in rows:
+        row_id, bookbub_url = r[0], r[1]
+        conn.execute(
+            "UPDATE deal SET owned_in_grimmory = ? WHERE id = ?",
+            (owned_map.get(bookbub_url), row_id),
+        )
+        n += 1
+    return n
 
 
 # --------------------------------------------------------------------------- #

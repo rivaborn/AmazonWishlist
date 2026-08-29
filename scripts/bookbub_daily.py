@@ -16,6 +16,15 @@ One run does the whole daily cycle:
    ``(date, bookbub_url)`` and computes ``owned_in_grimmory`` against
    ``GRIMMORY_DB`` and sets ``no_amazon_link``. (requirements 3 + 4)
 
+   It then **refreshes ``owned_in_grimmory`` for every row** against the
+   local ``GRIMMORY_DB`` file (``deals_db.refresh_owned``) — the upsert only
+   audits the date it just stored, so books added to the library since the
+   last store would otherwise still show on the tab. A missing grimmory.db
+   sets the flags NULL (such deals still show) and never aborts the run.
+   (The grimmory.db file itself is refreshed out-of-band on the host — the
+   updater runs inside the wlvpn netns where the Grimmory server is not
+   reachable.)
+
 2. **Re-verify** — invoke ``scripts/verify_deals.py`` in ``--recheck`` mode
    (as a module) so every deal that is NOT yet ``expired`` — i.e.
    ``current`` / ``unknown`` / unchecked — is re-read against its current
@@ -150,6 +159,26 @@ def main() -> int:
     except Exception as e:  # a store failure is fatal — the re-verify would churn stale rows
         log.error("failed to store deals in %s: %s", args.db, e)
         return 1
+
+    # (1b) Refresh owned_in_grimmory for ALL rows against the current
+    #      grimmory.db. store_deals only audited the date it just stored, so
+    #      books newly added to the library would still be flagged not-owned
+    #      (and show on the tab). Re-applying from the local grimmory.db file
+    #      keeps the flag current. Best-effort: a missing grimmory.db leaves
+    #      the flags NULL (unknown) and a DB error is logged, not fatal —
+    #      the re-verify step still runs.
+    try:
+        conn = deals_db.connect(args.db)
+        try:
+            deals_db.ensure_schema(conn)
+            updated = deals_db.refresh_owned(conn, GRIMMORY_DB)
+            conn.commit()
+        finally:
+            conn.close()
+        log.info("refreshed owned_in_grimmory for %d deal row(s) against %s",
+                 updated, GRIMMORY_DB)
+    except Exception as e:
+        log.warning("owned_in_grimmory refresh failed (continuing): %s", e)
 
     # (2) Re-verify every non-expired deal (expired is never re-checked).
     #     verify_deals.main() parses sys.argv[1:], so swap it for our own args.
