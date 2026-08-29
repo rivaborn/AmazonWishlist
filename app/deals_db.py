@@ -46,6 +46,7 @@ __all__ = [
     "mark_verified",
     "parse_price_cents",
     "classify_deal",
+    "current_deals",
 ]
 
 # --------------------------------------------------------------------------- #
@@ -364,6 +365,47 @@ def mark_verified(
         "UPDATE deal SET deal_status = ?, current_price = ?, verified_at = ? WHERE id = ?",
         (status, current_price, at, row_id),
     )
+
+
+def _format_deal_date(date: str | None) -> str:
+    """``YYYYMMDD`` -> ``YYYY-MM-DD`` for display; anything else passes through."""
+    if date and len(date) == 8 and date.isdigit():
+        return f"{date[:4]}-{date[4:6]}-{date[6:8]}"
+    return date or ""
+
+
+def current_deals(conn: sqlite3.Connection) -> list[dict]:
+    """Live BookBub deals for the web app's BookBub Deals tab.
+
+    Returns ``{id, title, author, date, deal_price, original_price,
+    amazon_url}`` dicts for every row the app presents as an in-flight deal:
+    ``deal_status`` is ``current`` (verified live on Amazon) **and**
+    ``amazon_url`` is present (the tab links the title to Amazon). That
+    excludes expired deals, ``unknown`` deals (unreadable — treated as
+    unverified), and unchecked deals (``deal_status`` NULL) at the query
+    layer. Newest first (``date DESC, id DESC``); ``date`` is reformatted
+    from ``YYYYMMDD`` to ``YYYY-MM-DD`` for display.
+    """
+    rows = conn.execute(
+        "SELECT id, date, title, author, deal_price, original_price, amazon_url "
+        "FROM deal WHERE deal_status = ? AND amazon_url IS NOT NULL "
+        "ORDER BY date DESC, id DESC",
+        (DEAL_STATUS_CURRENT,),
+    ).fetchall()
+    out: list[dict] = []
+    for row_id, date, title, author, deal_price, original_price, amazon_url in rows:
+        out.append(
+            {
+                "id": row_id,
+                "title": title,
+                "author": author,
+                "date": _format_deal_date(date),
+                "deal_price": deal_price,
+                "original_price": original_price,
+                "amazon_url": amazon_url,
+            }
+        )
+    return out
 
 
 def classify_deal(deal_price: str | None, current_price: str | None) -> tuple[str, int | None]:
