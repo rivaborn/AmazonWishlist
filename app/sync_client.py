@@ -12,6 +12,11 @@ with holes punched in it. That matters: both `_LATEST_BASE`'s `prev` CTE and
 `price_drop_history` derive their baseline from "the previous observed_at", so a
 hole would fabricate a price drop. A truncated tail merely shows older prices,
 and the next sync fills it in from MAX(id).
+
+After the snapshots, the BookBub deals DB + covers mirror on the same pull
+(`_pull_deals`, whole-table replace via `sync.apply_deals`) — non-fatally: a
+primary without /api/sync/deals just skips it, and the wishlist sync still
+completes.
 """
 
 from __future__ import annotations
@@ -57,10 +62,12 @@ def run_sync() -> dict:
             watermark=sync.local_watermark(),
         )
         log.info(
-            "Sync complete: %s wishlists, %s books, %s new snapshots (watermark %s)",
+            "Sync complete: %s wishlists, %s books, %s new snapshots, %s deals "
+            "(watermark %s)",
             result["wishlists"],
             result["books"],
             result["snapshots"],
+            result.get("deals", 0),
             sync.local_watermark(),
         )
         return {"ok": True, **result}
@@ -112,9 +119,46 @@ def _pull() -> dict:
             if not page.get("has_more"):
                 break
 
+        # The BookBub deals mirror (whole table + covers) rides the same daily
+        # pull. It is deliberately non-fatal to the wishlist sync: a 404 from
+        # an older primary, a malformed payload, or a failed apply just skips
+        # it this run (logged) and retries on the next one.
+        deals = _pull_deals(client)
+
     return {
         "wishlists": applied["wishlists"],
         "books": applied["books"],
         "memberships": applied["memberships"],
         "snapshots": pulled,
+        "deals": deals,
     }
+
+
+def _pull_deals(client: httpx.Client) -> int:
+    """Pull the primary's BookBub deals DB + covers into this mirror.
+
+    Returns the number of deal rows applied. GRACEFUL by design so mixed-
+    version peers keep working and the deals mirror never takes the wishlist
+    sync down: a 404 (a primary that predates /api/sync/deals) logs at INFO,
+    and any other fetch/JSON/apply failure logs a warning — both return 0
+    and the rest of the sync completes.
+    """
+    try:
+        r = client.get("/api/sync/deals")
+        r.raise_for_status()
+        payload = r.json()
+    except (httpx.HTTPError, ValueError) as e:
+        if isinstance(e, httpx.HTTPStatusError) and e.response.status_code == 404:
+            log.info("primary has no /api/sync/deals (older version); skipping the deals mirror")
+        else:
+            log.warning("deals mirror skipped this run: %s", e)
+        return 0
+    if "deals" not in payload:  # malformed / unexpected payload shape
+        log.warning("deals payload missing the 'deals' key; skipping the deals mirror")
+        return 0
+    try:
+        result = sync.apply_deals(payload, config.DEALS_COVERS_DIR)
+    except Exception as e:  # a broken deals payload must not fail the wishlist sync
+        log.warning("deals mirror apply failed (%s); the wishlist sync continues", e)
+        return 0
+    return result.get("deals", 0)

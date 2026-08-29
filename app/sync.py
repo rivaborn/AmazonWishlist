@@ -2,7 +2,11 @@
 
 Both ends of the wire live in this one file so the payload formats cannot drift
 apart. The primary serves `export_*` over `/api/sync/*`; the secondary calls
-`apply_*` with what it fetched (see `sync_client.py`).
+`apply_*` with what it fetched (see `sync_client.py`). The BookBub deals DB
+plus its cover images mirror the same way — `GET /api/sync/deals`
+(`export_deals` / `apply_deals`) on the SAME once-a-day pull, whole-table
+replace (no watermark; see the Deals mirror section below) — so a secondary
+can duplicate the primary's BookBub Deals page.
 
 The whole design rests on one property of this schema: `price_snapshot` is
 append-only with an AUTOINCREMENT id, and SQLite is single-writer. Nothing in
