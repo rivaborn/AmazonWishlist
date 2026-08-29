@@ -120,7 +120,7 @@ Set in `amazon-wishlist.service` under `Environment=` if you need to override.
 ## Pages
 
 - **/deals** — books on a wishlist whose latest snapshot is below baseline by ≥ filters. Filter by minimum dollar drop, minimum percent drop, and basis (vs. previous observed price or vs. list/strikethrough price).
-- **/bookbub-deals** — the BookBub Deals tab: BookBub deals currently verified live on Amazon (see "Verifying deals are still live" below). Each row shows Title (a link that opens the Amazon product page in a new tab), Author, Deal price, Regular price, and Date of Deal. Its source is `data/deals.db` (`DEALS_DB`): only rows with `deal_status = 'current'` and an `amazon_url` are listed — expired, unverified (NULL status), and unreadable (`unknown`) deals are omitted. The **Deal price** and **Date of Deal** columns are clickable sort headers: clicking one cycles ascending/descending, and clicking a non-active column switches to it with its default (price ascending = cheapest first, date descending = most recent first); the default order is Date of Deal descending (most recent first). The URL query params are `sort=price` or `sort=date` and `dir=asc` or `dir=desc`, preserved across pagination. Each row has a **Hide** checkbox (leading column) that hides that book from the tab; it persists to the DB via `POST /api/deals/{id}/hidden` (`deal.hidden`), and the **Show Hidden** checkbox at the top reveals hidden deals (`?show_hidden=1`). Read-only on both instances (the hide toggle is primary-only, like the purchased flag).
+- **/bookbub-deals** — the BookBub Deals tab: BookBub deals currently verified live on Amazon (see "Verifying deals are still live" below). Each row shows Title (a link that opens the Amazon product page in a new tab), Author, Deal price, Regular price, and Date of Deal. Its source is `data/deals.db` (`DEALS_DB`): only rows with `deal_status = 'current'` and an `amazon_url` are listed — expired, unverified (NULL status), and unreadable (`unknown`) deals are omitted. The **Deal price** and **Date of Deal** columns are clickable sort headers: clicking one cycles ascending/descending, and clicking a non-active column switches to it with its default (price ascending = cheapest first, date descending = most recent first); the default order is Date of Deal descending (most recent first). Each row also carries the book's **cover image** — `<img class="deal-cover">`, served at `/covers/<name>` from the local `data/covers/` directory — and the title link shows the book's **description** as a hover tooltip; both are captured during verification (below) and blank until a deal's book has been verified. A **per-page dropdown** (20/40/60/80/100, default 20) picks how many rows per page; `per_page` is preserved across sorting, pagination, and the dropdown itself. The URL query params are `sort=price` or `sort=date` and `dir=asc` or `dir=desc`, preserved across pagination. Each row has a **Hide** checkbox (leading column) that hides that book from the tab; it persists to the DB via `POST /api/deals/{id}/hidden` (`deal.hidden`), and the **Show Hidden** checkbox at the top reveals hidden deals (`?show_hidden=1`). Read-only on both instances (the hide toggle is primary-only, like the purchased flag).
 - **/books** — every available book across all wishlists, sorted by current price ascending. Header shows total count, lowest, and highest.
 - **/no-price** — split into "Kindle edition unavailable" and "Removed from Amazon" (HTTP 404).
 - **/price-drops** — every historical snapshot that dropped vs. its baseline, filtered.
@@ -246,6 +246,7 @@ Served by the **primary** and consumed by the secondary:
 
 - `GET /api/sync/catalog` — the whole small half of the DB (`wishlist`, `book`, `wishlist_book`) read in one transaction, plus `max_snapshot_id` (the watermark that catalog is consistent with) and `source_now` (the primary's clock).
 - `GET /api/sync/snapshots?since_id=&max_id=&limit=` — one ascending page of the append-only `price_snapshot` log as positional arrays. Returns `has_more` / `next_since_id`.
+- `GET /api/sync/deals` — the whole BookBub `deal` table (all columns, incl. `cover`/`description`/`hidden`) plus the cover images as base64, fetched on the same once-a-day pull. The table is small, so the secondary **replaces its local rows wholesale** (no watermark, no cursor) and rewrites the covers into its own `DEALS_COVERS_DIR` — a secondary duplicates the primary's BookBub Deals page, covers and tooltips included.
 
 About **this** instance's own mirroring, on either role:
 
@@ -319,6 +320,8 @@ The first sync pulls the full snapshot history — for ~1,000 tracked items that
 
 The `/wishlists` page on a secondary shows **two** freshness figures, which answer different questions: the per-row *stale* flag is how old the **primary's scrape** is (computed against the primary's own clock, carried down with the catalog, so the two hosts need not share a timezone), and the mirror panel is how old **our copy of the primary** is.
 
+The same pull also mirrors the BookBub deals DB + covers (`GET /api/sync/deals`, above) — so the BookBub Deals tab works identically on a secondary and updates with everything else once a day. The deals pull is **non-fatal** to the wishlist sync: an older primary without the endpoint (404) is skipped with a log line and retried on the next pull, so mixed-version peers keep working.
+
 ### Picking the sync time
 
 The sync hour must land **after** the primary has finished its nightly run, or the wishlists it scrapes last stay a day behind on the mirror.
@@ -350,6 +353,8 @@ sudo systemctl stop amazon-wishlist
 sudo -u wishlist rm /opt/amazon-wishlist/data/wishlist.db*
 sudo systemctl start amazon-wishlist
 ```
+
+The deals mirror needs **no** recovery action: it holds no cursor and no local state — every pull wholesale-replaces the local `deal` rows and rewrites the covers, so the next sync re-converges it automatically.
 
 ## Grimmory book catalog (data/grimmory.db)
 
@@ -432,6 +437,9 @@ The `deal` table has one row per BookBub deal per day:
 | `deal_status` | live-deal check outcome: `current` / `expired` / `unknown` — **NULL until first verified** (written by `scripts/verify_deals.py`; the resume cursor). |
 | `current_price` | the Amazon price last read during verification (NULL when the read was unreadable → `unknown`). |
 | `verified_at` | ISO timestamp of the last live check. |
+| `hidden` | `1`/`0` — row hidden from the BookBub Deals tab by the per-row checkbox (primary-only toggle; the mirror carries the flag). |
+| `cover` | filename of the captured cover image in `data/covers/` (e.g. `B0….jpg`) — **NULL until the book's page has been verified** (captured by `scripts/verify_deals.py`). |
+| `description` | the book's Amazon description captured at verification (hover tooltip on the tab) — **NULL until verified**. |
 
 Rows are keyed by a UNIQUE index on `(date, bookbub_url)`. Re-running the same date **upserts** that day's rows (refreshed, never duplicated); rows for other dates are never deleted, so the history is kept for audit. The ownership lookup reads `grimmory.db` read-only and is approximate on purpose (normalised title **and** author must both match).
 
@@ -478,6 +486,7 @@ python scripts/verify_deals.py --netns wlvpn …   # Ubuntu: run INSIDE the wlvp
 
 - **Per-book price check**: each pending deal (`deal_status IS NULL` with an Amazon ASIN) is opened at `amazon.com/dp/<ASIN>` via `app/amazon_price.py` and compared to the stored `deal_price`: the current price at or below the deal price → **`current`**, above it → **`expired`**, and a price that cannot be read (blocked page, no price) → **`unknown`** — never guessed. When `LLM_MODEL` is set, an unreadable page falls back to the optional local LLM asking for just the current price (off by default; an LLM failure only logs a warning and leaves the price unreadable, so the row lands `unknown`).
 - **Outcome columns**: `mark_verified` writes `deal_status`, the read `current_price` (NULL when `unknown`), and `verified_at` onto the `deal` row. **`deal_status` is the resume cursor** — a pending deal is exactly `deal_status IS NULL`, so an interrupted run resumes by simply re-running (verified rows are skipped, and a re-run of a finished run is a fast no-op); `data/verify_progress.json` (atomic tmp+replace) is an advisory telemetry mirror, never the source of truth. `--fresh` starts a new run scope; `--db` targets another DB (default `DEALS_DB`); `--check` is a dry run that prints the pending count + effective config, connects to nothing, and exits 0.
+- **Cover + description capture**: the same page read also captures the book's **cover image** and **description**, best-effort — the cover is downloaded to `data/covers/` (`DEALS_COVERS_DIR`, filename `<ASIN>.<ext>`) and both are stored on the `deal` row (`cover` = the filename, `description` = the text, via `deals_db.update_cover_desc`), feeding the tab's cover column and hover tooltip. A capture failure never fails the run (logged, the price check stands) and rows that were never captured stay NULL (blank cover, no tooltip).
 - **NordVPN exit-IP rotation**: every `--rotate-every` books — the default is **10 books per IP** (`NORDVPN_ROTATE_EVERY`) — the run hops to a different NordVPN server via `app/nordvpn.py`: `rotate()` = disconnect → connect to a country/city *different* from the current one (pooled in `NORDVPN_COUNTRIES`) → read the new exit IP. In `--netns` tunnel mode (the Ubuntu deployment, below) the hop is instead a *best-effort tunnel rebuild* for a fresh exit IP — the namespace's IP is fixed for the tunnel's life, and a rebuild that is not permitted leaves the stable IP while the run continues.
 - **Fingerprint rotation**: each book is fetched in its own browser context with a rotated fingerprint (`app/fingerprint.py`) — one of four plain desktop-Chrome 149 User-Agents with distinct OS tokens (`_LINUX` `X11; Linux x86_64`, `_WIN` `Windows NT 10.0; Win64; x64`, `_MAC` `Macintosh; Intel Mac OS X 10_15_7`, `_CROS` `X11; CrOS x86_64`), one of six `en-*` locales, and one of five viewports. After every exit-IP rotation the next fingerprint is *fresh* — different in **all three** fields from the previous one — so the IP and the browser identity change together.
 - **Anti-bot pacing and retries**: per-book reads are spaced by a random jitter (`VERIFY_DELAY_MIN`–`VERIFY_DELAY_MAX` seconds, the same idea as the wishlist scraper's pacing); a blocked page, failed navigation, or no-price result is retried with backoff (`VERIFY_RETRY_BACKOFF` × up to `VERIFY_MAX_RETRIES`) before the book is recorded `unknown`. Blocked/ambiguous pages are dumped to `data/diagnostics/` for selector debugging.
@@ -496,7 +505,7 @@ BOOKBUB_USERNAME='...' BOOKBUB_PASSWORD='...' python scripts/bookbub_daily.py [-
 #   journalctl -u amazon-wishlist-bookbub -f
 ```
 
-1. **Fetch + store** — pulls the day's BookBub daily deals (`bookbub.fetch_daily_deals`: logs into the BookBub account with `BOOKBUB_USERNAME` / `BOOKBUB_PASSWORD`; Playwright clears the Cloudflare challenge) and upserts them into `data/deals.db` via `deals_db.store_deals` — idempotent per date, computes `owned_in_grimmory` from `data/grimmory.db` (books you own never show on the tab) and sets `no_amazon_link`.
+1. **Fetch + store** — pulls the day's BookBub daily deals (`bookbub.fetch_daily_deals`: logs into the BookBub account with `BOOKBUB_USERNAME` / `BOOKBUB_PASSWORD`; Playwright clears the Cloudflare challenge) and upserts them into `data/deals.db` via `deals_db.store_deals` — idempotent per date, computes `owned_in_grimmory` from `data/grimmory.db` (books you own never show on the tab) and sets `no_amazon_link`. It then **refreshes `owned_in_grimmory` on every stored row** against `data/grimmory.db` (`deals_db.refresh_owned`) — so a book added to your Grimmory libraries since the last run is re-flagged owned and drops off the tab on the next run without any re-fetch; a missing/empty `grimmory.db` leaves the flags NULL and the run still completes.
 2. **Re-verify** — then runs `scripts/verify_deals.py --recheck` (the tunnel/fingerprint/pacing loop above) over every deal that is **not yet** `expired` — i.e. `current`, `unknown`, and unchecked — re-reading each against its live Amazon price. `expired` is terminal and is **never re-checked**; deals that come back `current` flow into the BookBub Deals tab automatically.
 
 **Scheduling (Ubuntu)**: `amazon-wishlist-bookbub.timer` fires `amazon-wishlist-bookbub.service` at **18:00 local time** daily (`OnCalendar=*-*-* 18:00:00`, `Persistent=true` so a missed run fires on next boot). The service runs the updater **inside the `wlvpn` tunnel namespace** (`BindsTo=amazon-wishlist-vpn.service`), so the re-verify's Amazon reads egress only through NordVPN — the same fail-closed guarantee as the one-shot verify unit. `install_systemd.sh` installs and enables the timer on every deploy and best-effort starts the service once (missing credentials must never block a deploy).
@@ -529,7 +538,10 @@ The BookBub credentials and session link are never committed (the credentials ar
 | `BOOKBUB_DAILY_DEALS_BASE` | `https://www.bookbub.com/ebook-deals/daily-deals` | Daily-deals page; the day is the `?date=YYYYMMDD` query arg. |
 | `BOOKBUB_DATE_FORMAT` | `%Y%m%d` | strftime format of the `?date=` value. |
 | `BOOKBUB_OUTPUT` | `booklist.md` (repo root) | Where the report is written. |
-| `DEALS_DB` | `data/deals.db` | The deals database (gitignored via `data/`): each day's deals, resolved Amazon links, and the owned-in-grimmory audit. |
+| `DEALS_DB` | `data/deals.db` | The deals database (gitignored via `data/`): each day's deals, resolved Amazon links, the owned-in-grimmory audit, and the captured cover/description. Mirrored to a secondary whole-table via `GET /api/sync/deals`. |
+| `DEALS_COVERS_DIR` | `data/covers` | Local directory for the deal cover images captured at verification (filenames `<ASIN>.<ext>`, served at `/covers/<name>`; gitignored via `data/`). Mirrored to a secondary alongside the deal rows. |
+| `BOOKBUB_PER_PAGE_OPTIONS` | `[20, 40, 60, 80, 100]` | The per-page options offered by the BookBub Deals tab dropdown (a config constant in `app/config.py`, not env-driven — edit it there). An out-of-list `per_page` request snaps to the nearest option. |
+| `BOOKBUB_PER_PAGE_DEFAULT` | `20` | Default per-page for the BookBub Deals tab (same constant in `app/config.py`). |
 | `BOOKBUB_BACKFILL_START` | `20260826` | Newest day the backfill processes, `YYYYMMDD`. |
 | `BOOKBUB_BACKFILL_END` | `20260613` | Oldest day the backfill processes, `YYYYMMDD` (inclusive). |
 | `BOOKBUB_BACKFILL_CHUNK` | `5` | Dates per login session (re-login between chunks). |
