@@ -193,6 +193,13 @@ GRIMMORY_DB = Path(os.environ.get("GRIMMORY_DB", DATA_DIR / "grimmory.db"))
 # never be committed here.
 BOOKBUB_LOGIN_LINK = os.environ.get("BOOKBUB_LOGIN_LINK", "")
 
+# BookBub account credentials (primary login for the daily updater). Like the
+# Grimmory credentials above, these are real secrets read from the environment
+# at run time (on the host via /etc/default/amazon-wishlist) and must never be
+# committed here. Empty value means "not configured".
+BOOKBUB_USERNAME = os.environ.get("BOOKBUB_USERNAME", "").strip()
+BOOKBUB_PASSWORD = os.environ.get("BOOKBUB_PASSWORD", "")
+
 # Where the daily deals live. The selected day is a ?date=YYYYMMDD query arg.
 BOOKBUB_DAILY_DEALS_BASE = os.environ.get(
     "BOOKBUB_DAILY_DEALS_BASE",
