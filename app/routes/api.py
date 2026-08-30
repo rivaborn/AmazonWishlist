@@ -108,34 +108,52 @@ def _parse_hhmm(value: Optional[str], field: str) -> Optional[tuple[int, int]]:
     return (hour, minute)
 
 
-@router.post("/settings", dependencies=[Depends(_require_primary)])
+@router.post("/settings")
 def save_settings(
     scrape_time: Optional[str] = Form(None),
     bookbub_time: Optional[str] = Form(None),
     cover_size: Optional[str] = Form(None),
     tooltip_size: Optional[str] = Form(None),
 ):
-    """Save app settings (the Settings tab) — primary only.
+    """Save app settings (from the Settings tab and the display-size dropdowns).
 
-    Any of the fields may be supplied; only supplied values are written, so the
-    BookBub Deals cover-size / tooltip-size dropdowns (which POST just their
-    own field) reuse this endpoint. Times are persisted as
-    scrape_hour/scrape_minute and bookbub_hour/bookbub_minute (server local)
-    and take effect from the next daily run via scheduler.reschedule_jobs(); the
-    cover/tooltip sizes apply on the next page load. PRG: 303 -> /settings on
-    success (the dropdowns ignore the redirect and reload their own page).
+    Role-aware:
+
+    * PRIMARY — any of the fields may be supplied; only supplied values are
+      written. Times are persisted as scrape_hour/scrape_minute and
+      bookbub_hour/bookbub_minute (server local) and take effect from the next
+      daily run via scheduler.reschedule_jobs(); cover/tooltip sizes apply on
+      the next page load.
+    * SECONDARY (mirror) — only the LOCAL display preferences
+      (``cover_size`` / ``tooltip_size``) may be written: they are stored in
+      this instance's own settings table (never mirrored), so a mirror can size
+      its covers/tooltips independently of the primary. The run-time fields
+      (``scrape_time`` / ``bookbub_time``) are rejected with 403 because a
+      mirror never schedules a run, and the Settings page itself stays
+      primary-only.
+
+    PRG: 303 -> /settings on success (the dropdowns ignore the redirect and
+    reload their own page).
     """
+    secondary = config.is_secondary()
+    if secondary and (scrape_time is not None or bookbub_time is not None):
+        raise HTTPException(
+            403,
+            "run-time settings are primary-only; a mirror may only set its local "
+            "display preferences (cover_size / tooltip_size)",
+        )
     time_changed = False
-    st = _parse_hhmm(scrape_time, "scrape_time")
-    if st is not None:
-        settings.set("scrape_hour", st[0])
-        settings.set("scrape_minute", st[1])
-        time_changed = True
-    bt = _parse_hhmm(bookbub_time, "bookbub_time")
-    if bt is not None:
-        settings.set("bookbub_hour", bt[0])
-        settings.set("bookbub_minute", bt[1])
-        time_changed = True
+    if not secondary:
+        st = _parse_hhmm(scrape_time, "scrape_time")
+        if st is not None:
+            settings.set("scrape_hour", st[0])
+            settings.set("scrape_minute", st[1])
+            time_changed = True
+        bt = _parse_hhmm(bookbub_time, "bookbub_time")
+        if bt is not None:
+            settings.set("bookbub_hour", bt[0])
+            settings.set("bookbub_minute", bt[1])
+            time_changed = True
     if cover_size is not None and cover_size.strip():
         cs = cover_size.strip()
         if cs not in config.BOOKBUB_COVER_SIZE_OPTIONS:
@@ -150,7 +168,7 @@ def save_settings(
                 400, f"tooltip_size must be one of {config.BOOKBUB_TOOLTIP_SIZE_OPTIONS}"
             )
         settings.set("tooltip_size", ts)
-    if time_changed:
+    if not secondary and time_changed:
         from .. import scheduler
 
         scheduler.reschedule_jobs()

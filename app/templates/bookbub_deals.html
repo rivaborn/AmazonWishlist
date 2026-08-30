@@ -28,10 +28,11 @@
       {% endfor %}
     </select>
   </label>
-  {# Cover-size dropdown (req 6C / req 2): saves the default cover size via
-     the same POST /api/settings as the Settings tab, then reloads. A control
-     that writes — so it does not render on a read-only mirror. #}
-  {% if not readonly %}
+  {# Cover-size / Tooltip-size dropdowns: each saves its local default via
+     POST /api/settings, then reloads. These render on BOTH instances — on the
+     primary they set the shared setting; on a mirror they set that instance's
+     own LOCAL display preference (a mirror may size its covers/tooltips
+     independently, see api.save_settings). #}
   <label class="per-page cover-size">
     Cover size
     <select id="cover-size-select"
@@ -50,7 +51,6 @@
       {% endfor %}
     </select>
   </label>
-  {% endif %}
 </p>
 
 {% if not rows %}
