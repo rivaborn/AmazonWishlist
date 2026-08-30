@@ -59,7 +59,12 @@ Environment="PLAYWRIGHT_HOST_PLATFORM_OVERRIDE=ubuntu24.04-x64"
 # WISHLIST_VPN_*). Optional: the leading `-` means an install that keeps the
 # defaults needs no such file.
 EnvironmentFile=-/etc/default/amazon-wishlist
-ExecStart=/opt/amazon-wishlist/.venv/bin/python scripts/bookbub_daily.py --netns wlvpn
+# Run the whole cycle under a throwaway virtual display: the BookBub fetch's
+# headful fallback (app/bookbub.py tries headless first, then a HEADED browser
+# to clear Cloudflare more reliably) needs an X server, and this box is
+# headless. xvfb-run -a starts an isolated Xvfb and tears it down when the run
+# ends; the headless re-verify pass simply ignores the display.
+ExecStart=/usr/bin/xvfb-run -a /opt/amazon-wishlist/.venv/bin/python scripts/bookbub_daily.py --netns wlvpn
 # Teardown after EVERY run (success, failure, or crash): the VPN is in use only
 # while the daily cycle is running ("when not in use, the VPN should not be
 # connected"). ExecStopPost runs as the service user, hence the scoped sudoers
