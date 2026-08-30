@@ -23,6 +23,10 @@ h2 { margin-top: 0; }
 section { margin-bottom: 2rem; }
 table { width: 100%; border-collapse: collapse; background: var(--panel);
   border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+/* The bookBub deals table must NOT clip its description tooltips — they are
+   66vw and would be sliced at the table's edge. Other tables keep overflow:
+   hidden for the rounded-corner background clip. */
+table.covers-1x, table.covers-2x, table.covers-4x { overflow: visible; }
 th, td { padding: .55rem .75rem; text-align: left; border-bottom: 1px solid var(--border); }
 th { background: rgba(255,255,255,.03); font-weight: 600; font-size: .85rem; color: var(--muted); }
 tr:last-child td { border-bottom: 0; }
