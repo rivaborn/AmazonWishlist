@@ -24,10 +24,12 @@ RestartSec=5
 
 # Hardening
 # NOTE: chromium's multi-process model (zygote / crashpad / IPC sockets) is
-# fragile under systemd PrivateTmp and ProtectHome. We keep NoNewPrivileges
-# and a softened ProtectSystem; PrivateTmp is dropped because chromium's
-# child processes share /tmp socket paths the parent set up.
-NoNewPrivileges=true
+# fragile under systemd PrivateTmp and ProtectHome. We do NOT set
+# NoNewPrivileges: the app's scheduler needs the scoped `wishlist` sudoers rule
+# (`sudo -n systemctl start amazon-wishlist-bookbub.service`) to fire the daily
+# BookBub run, and NoNewPrivileges=true silently blocks sudo. We keep a
+# softened ProtectSystem; PrivateTmp is dropped because chromium's child
+# processes share /tmp socket paths the parent set up.
 ProtectSystem=false
 PrivateTmp=false
 ReadWritePaths=/opt/amazon-wishlist/data /opt/amazon-wishlist/.cache

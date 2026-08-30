@@ -109,12 +109,19 @@ install -m 644 "$APP_DIR/amazon-wishlist.service" /etc/systemd/system/amazon-wis
 # WISHLIST_VPN_USER (see above); until then it cannot come up, and a bookbub
 # run then fails fast (Requires=) — which must never block a deploy.
 install -m 644 "$APP_DIR/amazon-wishlist-vpn.service" /etc/systemd/system/amazon-wishlist-vpn.service
-# BookBub daily updater (scripts/bookbub_daily.py): a oneshot service that runs
-# inside the wlvpn netns. It is NO LONGER timer-driven: the APP schedules the
-# run (app/scheduler.py, at the BookBub time set in the Settings tab) by
-# starting this unit via the scoped sudoers rule provisioned below — so this
-# deploy must NOT start it (a run blocks for the whole cycle, ~an hour).
+# BookBub daily updater (scripts/bookbub_daily.py): a oneshot that runs the
+# FETCH on the HOST (headful Chromium can't launch inside the netns) and then
+# triggers amazon-wishlist-verify.service for the in-netns re-check. It is NO
+# LONGER timer-driven: the APP schedules the run (app/scheduler.py, at the
+# BookBub time set in the Settings tab) by starting this unit via the scoped
+# sudoers rule provisioned below — so this deploy must NOT start it (a run
+# blocks for the whole cycle, ~an hour).
 install -m 644 "$APP_DIR/amazon-wishlist-bookbub.service" /etc/systemd/system/amazon-wishlist-bookbub.service
+# The netns verifier: the daily re-check runs headless inside the wlvpn
+# namespace via this unit (started by bookbub_daily at the end of its run,
+# `--recheck`); it also serves ad-hoc full rechecks. No [Install] section, so
+# it is never enabled at boot — only the daily trigger / manual start runs it.
+install -m 644 "$APP_DIR/amazon-wishlist-verify.service" /etc/systemd/system/amazon-wishlist-verify.service
 # Retire the timer if a previous install left it (the app now schedules the run).
 systemctl disable --now amazon-wishlist-bookbub.timer 2>/dev/null || true
 systemctl remove amazon-wishlist-bookbub.timer 2>/dev/null || true
@@ -126,11 +133,12 @@ systemctl enable amazon-wishlist.service
 systemctl disable --now amazon-wishlist-vpn.service 2>/dev/null || true
 systemctl stop amazon-wishlist-vpn.service 2>/dev/null || true
 # Scoped sudoers rule (NOT blanket sudo — same pattern as the vpn_verify.sh
-# scoped rule): lets the app (the wishlist user) start the netns-bound bookbub
-# unit on schedule, and lets the bookbub unit's ExecStopPost tear the VPN down.
-# visudo -cf validates the rule; a malformed one aborts the deploy (set -e).
+# scoped rule): lets the app (the wishlist user) start the bookbub unit on
+# schedule, lets bookbub_daily start the netns verify unit for the re-check,
+# and lets those units' ExecStopPost tear the VPN down. visudo -cf validates
+# the rule; a malformed one aborts the deploy (set -e).
 cat > /etc/sudoers.d/amazon-wishlist <<'SUDOERS'
-wishlist ALL=(root) NOPASSWD: /usr/bin/systemctl start amazon-wishlist-bookbub.service, /usr/bin/systemctl stop amazon-wishlist-vpn.service
+wishlist ALL=(root) NOPASSWD: /usr/bin/systemctl start amazon-wishlist-bookbub.service, /usr/bin/systemctl stop amazon-wishlist-vpn.service, /usr/bin/systemctl start amazon-wishlist-verify.service
 SUDOERS
 chmod 0440 /etc/sudoers.d/amazon-wishlist
 visudo -cf /etc/sudoers.d/amazon-wishlist

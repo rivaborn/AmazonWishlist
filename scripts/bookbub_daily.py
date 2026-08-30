@@ -73,7 +73,9 @@ pass failed; 2 = no BookBub credentials (real run only).
 
 import argparse
 import logging
+import subprocess
 import sys
+import time
 from pathlib import Path
 
 # `python scripts/bookbub_daily.py` puts scripts/ on sys.path[0] (so the sibling
@@ -91,6 +93,51 @@ from app.config import (  # noqa: E402
 )
 
 log = logging.getLogger("bookbub_daily")
+
+# The netns verify unit that runs the Amazon re-check headless inside wlvpn
+# (started + awaited in netns mode; the fetch itself runs OUTSIDE the netns).
+VERIFY_UNIT = "amazon-wishlist-verify.service"
+
+
+def _run_netns_recheck(args) -> int:
+    """Start the netns verify unit and wait for it to complete.
+
+    The production daily cycle runs its fetch OUTSIDE the ``wlvpn`` namespace
+    (headful Chromium — the Cloudflare-clearing fallback the fetch needs —
+    cannot launch inside a netns), so the Amazon re-check is delegated to
+    ``amazon-wishlist-verify.service``, which runs
+    ``verify_deals --netns wlvpn --recheck`` headless INSIDE the namespace.
+    Starting it (via the scoped sudoers rule) brings the tunnel up; we then
+    poll until the one-shot unit goes inactive/failed and return its result,
+    preserving the one-cycle-per-day semantics.
+    """
+    start = subprocess.run(
+        ["/usr/bin/sudo", "-n", "/usr/bin/systemctl", "start", VERIFY_UNIT],
+        capture_output=True, text=True,
+    )
+    if start.returncode != 0:
+        log.error("could not start %s for the re-check (rc=%d): %s",
+                  VERIFY_UNIT, start.returncode, start.stderr.strip())
+        return 1
+    # Wait (bounded) for the one-shot to finish.
+    deadline = time.monotonic() + 6 * 3600
+    while time.monotonic() < deadline:
+        st = subprocess.run(
+            ["/usr/bin/systemctl", "is-active", VERIFY_UNIT],
+            capture_output=True, text=True,
+        ).stdout.strip()
+        if st in ("inactive", "failed"):
+            res = subprocess.run(
+                ["/usr/bin/systemctl", "show", VERIFY_UNIT, "-p", "Result", "--value"],
+                capture_output=True, text=True,
+            ).stdout.strip()
+            if res != "success":
+                log.error("re-check unit %s finished with result '%s'", VERIFY_UNIT, res)
+                return 1
+            return 0
+        time.sleep(10)
+    log.error("timed out waiting for %s", VERIFY_UNIT)
+    return 1
 
 
 def _claim_daily_slot(db_path: str, date: str) -> bool:
@@ -253,20 +300,27 @@ def main() -> int:
     except Exception as e:
         log.warning("deduplicate failed (continuing): %s", e)
 
-    # (2) Re-verify every non-expired deal (expired is never re-checked).
-    #     verify_deals.main() parses sys.argv[1:], so swap it for our own args.
-    import verify_deals
-    verify_argv = ["--recheck", "--db", args.db, "--rotate-every", str(args.rotate_every)]
+    # (2) Re-verify every non-expired deal (expired is never re-checked). In
+    #     netns mode (the production unit) the fetch runs OUTSIDE the tunnel
+    #     namespace — headful Chromium can't launch inside a netns — so the
+    #     re-check is delegated to amazon-wishlist-verify.service, which runs
+    #     verify_deals headless INSIDE the wlvpn namespace (Requires= brings
+    #     the tunnel up; its ExecStopPost tears it down). We start it and wait,
+    #     keeping the one-cycle-per-day semantics. Non-netns (dev) invokes
+    #     verify_deals in-process as before.
     if args.netns:
-        verify_argv += ["--netns", args.netns]
-    if args.limit is not None:
-        verify_argv += ["--limit", str(args.limit)]
-    saved_argv = sys.argv
-    sys.argv = ["verify_deals.py", *verify_argv]
-    try:
-        verify_rc = verify_deals.main()
-    finally:
-        sys.argv = saved_argv
+        verify_rc = _run_netns_recheck(args)
+    else:
+        import verify_deals
+        verify_argv = ["--recheck", "--db", args.db, "--rotate-every", str(args.rotate_every)]
+        if args.limit is not None:
+            verify_argv += ["--limit", str(args.limit)]
+        saved_argv = sys.argv
+        sys.argv = ["verify_deals.py", *verify_argv]
+        try:
+            verify_rc = verify_deals.main()
+        finally:
+            sys.argv = saved_argv
 
     if verify_rc == 0 and not fetch_failed:
         log.info("daily BookBub updater: done for %s", date)

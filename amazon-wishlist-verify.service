@@ -7,7 +7,16 @@
 # RemainAfterExit, owns the namespace). This unit places the verifier in that
 # namespace at start and binds the namespace's Nord DNS over /etc/resolv.conf
 # (systemd does not apply the /etc/netns convention itself). BindsTo= the
-# tunnel unit so the verifier stops too if the tunnel stops.
+# tunnel unit so the verifier stops too if the tunnel stops; Requires= brings
+# the tunnel up, and ExecStopPost tears it down when the run is done, so the
+# VPN is only connected while the verifier is in use.
+#
+# This unit doubles as the daily re-verify step of the BookBub updater: the
+# daily fetch runs OUTSIDE the netns (headful Chromium cannot launch inside a
+# netns), and bookbub_daily starts THIS unit (--recheck) to run the Amazon
+# re-check headless inside the namespace. There is NO Restart= and no
+# [Install]: one run per trigger, and it is never enabled at boot — only the
+# once-a-day scheduler/manual start triggers it, so a restart never runs it.
 #
 # The NordVPN session is already negotiated by amazon-wishlist-vpn.service as
 # WISHLIST_VPN_USER — this unit needs NO NordVPN credentials and stores none.
@@ -17,8 +26,8 @@
 # WISHLIST_VPN_NS away from the default `wlvpn`, update this unit's
 # NetworkNamespacePath/BindReadOnlyPaths and the --netns argument too.)
 #
-# Run the real pass:  systemctl start amazon-wishlist-verify.service
-# Follow progress:    journalctl -u amazon-wishlist-verify -f
+# Run the full re-check:  sudo systemctl start amazon-wishlist-verify.service
+# Follow progress:        journalctl -u amazon-wishlist-verify -f
 # A finished pass is a fast no-op re-run (verified rows are skipped — the
 # resume cursor is deal_status in DEALS_DB, not any file).
 
@@ -44,16 +53,17 @@ Environment="PLAYWRIGHT_HOST_PLATFORM_OVERRIDE=ubuntu24.04-x64"
 # Per-host overrides (DEALS_DB, VERIFY_*, WISHLIST_VPN_*). Optional: the
 # leading `-` means an install that keeps the defaults needs no such file.
 EnvironmentFile=-/etc/default/amazon-wishlist
-ExecStart=/opt/amazon-wishlist/.venv/bin/python scripts/verify_deals.py --netns wlvpn
-Restart=on-failure
-RestartSec=30
+ExecStart=/opt/amazon-wishlist/.venv/bin/python scripts/verify_deals.py --netns wlvpn --recheck
+# Teardown after EVERY run: the tunnel is in use only while the verifier runs.
+# ExecStopPost runs as the service user, hence the scoped sudoers rule.
+ExecStopPost=/usr/bin/sudo -n /usr/bin/systemctl stop amazon-wishlist-vpn.service
+# No Restart= (one run per trigger — the app's once-a-day schedule is the
+# retry; a failure must die, not flap the tunnel on a restart loop). No
+# [Install] section: never enabled at boot.
 # Hardening (mirrors amazon-wishlist.service: chromium's multi-process model —
 # zygote / crashpad / shared /tmp sockets — breaks under stricter settings;
-# see the NOTE in that unit).
-NoNewPrivileges=true
+# see the NOTE in that unit). NoNewPrivileges is deliberately NOT set:
+# ExecStopPost relies on the scoped `wishlist` sudoers rule.
 ProtectSystem=false
 PrivateTmp=false
 ReadWritePaths=/opt/amazon-wishlist/data /opt/amazon-wishlist/.cache
-
-[Install]
-WantedBy=multi-user.target

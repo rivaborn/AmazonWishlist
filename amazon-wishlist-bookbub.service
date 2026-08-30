@@ -1,56 +1,44 @@
-# Amazon Wishlist daily BookBub deal updater (scripts/bookbub_daily.py) run
-# INSIDE the `wlvpn` NordVPN/WireGuard namespace so ONLY the re-verify pass's
-# Amazon price reads egress through NordVPN — the same fail-closed guarantee
-# as amazon-wishlist-verify.service (the BookBub fetch itself also routes
-# through the tunnel, which is harmless).
+# Amazon Wishlist daily BookBub deal updater (scripts/bookbub_daily.py). The
+# FETCH runs OUTSIDE the `wlvpn` namespace — headful Chromium (which the fetch
+# uses to clear the Cloudflare challenge) cannot launch inside a netns, and the
+# fetch needs neither the tunnel nor the netns. ONLY the re-verify pass's
+# Amazon price reads egress through NordVPN, via amazon-wishlist-verify.service
+# (started by bookbub_daily at the end of the run) — the same fail-closed
+# guarantee as before, just split across the two units.
 #
-# amazon-wishlist-vpn.service owns the namespace (Requires= / BindsTo=), so
-# starting this unit brings the tunnel up, and the ExecStopPost below tears it
-# down when the run is done — the VPN is only connected while the daily run is
-# in use. Triggered by the APP's scheduler (app/scheduler.py, at the BookBub
-# time set in the Settings tab), which runs:
+# Triggered by the APP's scheduler (app/scheduler.py, at the BookBub time set
+# in the Settings tab), which runs:
 #   sudo -n systemctl start amazon-wishlist-bookbub.service
 # via the scoped sudoers rule scripts/install_systemd.sh provisions. The old
 # amazon-wishlist-bookbub.timer (18:00) is retired — the app schedules the run.
 # Follow progress: journalctl -u amazon-wishlist-bookbub -f
 #
 # What one run does:
-#   1. fetch today's BookBub daily deals (BOOKBUB_LOGIN_LINK from
-#      /etc/default/amazon-wishlist — a per-day rotating token from the daily
-#      email; a missing link exits the run 2, a stale link fails the fetch),
-#   2. upserts them into DEALS_DB with the owned_in_grimmory flag
-#      (GRIMMORY_DB; owned books are hidden from the tab automatically),
-#   3. re-verifies every NON-EXPIRED deal against live Amazon prices
-#      (expired deals are never re-checked); newly current deals flow into
-#      the BookBub Deals tab automatically.
-#
-# install_systemd.sh reinstalls this unit from the repo on every deploy, so a
-# hand-edit here is reverted. (If you override WISHLIST_VPN_NS away from the
-# default `wlvpn`, update NetworkNamespacePath/BindReadOnlyPaths and the
-# --netns argument to match.)
-#
-# The NordVPN session is already negotiated by amazon-wishlist-vpn.service as
-# WISHLIST_VPN_USER — this unit needs NO NordVPN credentials and stores none.
-# Per-host settings (BOOKBUB_LOGIN_LINK, DEALS_DB, GRIMMORY_DB, VERIFY_*,
-# WISHLIST_VPN_*) go in /etc/default/amazon-wishlist.
+#   1. fetch today's BookBub daily deals (BOOKBUB_USERNAME / BOOKBUB_PASSWORD
+#      from /etc/default/amazon-wishlist; Playwright clears Cloudflare, headless
+#      then headed under Xvfb), upserts them into DEALS_DB, and refreshes
+#      owned_in_grimmory + dedups (owned books are hidden from the tab), then
+#   2. starts amazon-wishlist-verify.service, which re-verifies every
+#      NON-EXPIRED deal against live Amazon prices, headless INSIDE the wlvpn
+#      namespace (expired deals are never re-checked); newly current deals flow
+#      into the BookBub Deals tab automatically.
 
 [Unit]
-Description=Amazon Wishlist daily BookBub deal updater (via wlvpn VPN namespace)
-After=amazon-wishlist-vpn.service
-Requires=amazon-wishlist-vpn.service
-BindsTo=amazon-wishlist-vpn.service
+Description=Amazon Wishlist daily BookBub deal updater (fetch on host; re-verify via the netns verify unit)
+After=amazon-wishlist-verify.service
 
 [Service]
 Type=oneshot
 User=wishlist
 Group=wishlist
 WorkingDirectory=/opt/amazon-wishlist
-# Run inside the VPN namespace; bind its Nord DNS over /etc/resolv.conf.
-NetworkNamespacePath=/var/run/netns/wlvpn
-BindReadOnlyPaths=/etc/netns/wlvpn/resolv.conf:/etc/resolv.conf
-# Headless Chromium (BookBub fetch + Amazon price reader) needs the same
-# browser/home environment as the app unit — the browser lives only under
-# /opt/amazon-wishlist.
+# Runs OUTSIDE the tunnel namespace on purpose: the BookBub fetch's headful
+# fallback cannot launch inside the netns (headed Chromium crashes there with a
+# crashpad SIGTRAP), and the fetch needs neither the tunnel nor the netns. The
+# Amazon re-verify (step 2) runs headless INSIDE the netns via the
+# amazon-wishlist-verify.service unit, which bookbub_daily starts and waits on.
+# Headless Chromium (the price reader) needs the same browser/home environment
+# as the app unit — the browser lives only under /opt/amazon-wishlist.
 Environment="HOME=/opt/amazon-wishlist"
 Environment="XDG_RUNTIME_DIR=/tmp/runtime-wishlist"
 Environment="PLAYWRIGHT_BROWSERS_PATH=/opt/amazon-wishlist/.cache/playwright"
@@ -75,8 +63,9 @@ ExecStopPost=/usr/bin/sudo -n /usr/bin/systemctl stop amazon-wishlist-vpn.servic
 # on a 30 s restart loop all day.
 # Hardening (mirrors amazon-wishlist.service: chromium's multi-process model —
 # zygote / crashpad / shared /tmp sockets — breaks under stricter settings;
-# see the NOTE in that unit).
-NoNewPrivileges=true
+# see the NOTE in that unit). NoNewPrivileges is deliberately NOT set here:
+# the ExecStopPost (and the verify-unit trigger in step 2) rely on the scoped
+# `wishlist` sudoers rule, and NoNewPrivileges=true would silently block sudo.
 ProtectSystem=false
 PrivateTmp=false
 ReadWritePaths=/opt/amazon-wishlist/data /opt/amazon-wishlist/.cache
