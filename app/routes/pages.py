@@ -128,6 +128,7 @@ def bookbub_deals_page(
     d = _bookbub_dir(direction)
     pp = _bookbub_per_page(per_page)
     cover_size = settings.get("cover_size", config.BOOKBUB_COVER_SIZE_DEFAULT)
+    tooltip_size = settings.get("tooltip_size", config.BOOKBUB_TOOLTIP_SIZE_DEFAULT)
     conn = deals_db.connect(config.DEALS_DB)
     try:
         deals_db.ensure_schema(conn)  # idempotent (adds verification cols if missing)
@@ -158,6 +159,9 @@ def bookbub_deals_page(
                 "cover_size": cover_size,
                 "cover_size_options": config.BOOKBUB_COVER_SIZE_OPTIONS,
                 "cover_size_default": config.BOOKBUB_COVER_SIZE_DEFAULT,
+                "tooltip_size": tooltip_size,
+                "tooltip_size_options": config.BOOKBUB_TOOLTIP_SIZE_OPTIONS,
+                "tooltip_size_default": config.BOOKBUB_TOOLTIP_SIZE_DEFAULT,
                 "active": "bookbub",
             }
         ),
@@ -202,6 +206,7 @@ def settings_page(request: Request):
     bookbub_h = settings.get_int("bookbub_hour", config.BOOKBUB_HOUR_DEFAULT)
     bookbub_m = settings.get_int("bookbub_minute", config.BOOKBUB_MINUTE_DEFAULT)
     cover_size = settings.get("cover_size", config.BOOKBUB_COVER_SIZE_DEFAULT)
+    tooltip_size = settings.get("tooltip_size", config.BOOKBUB_TOOLTIP_SIZE_DEFAULT)
     return templates.TemplateResponse(
         request,
         "settings.html",
@@ -211,6 +216,8 @@ def settings_page(request: Request):
                 "bookbub_time": f"{bookbub_h:02d}:{bookbub_m:02d}",
                 "cover_size": cover_size,
                 "cover_size_options": config.BOOKBUB_COVER_SIZE_OPTIONS,
+                "tooltip_size": tooltip_size,
+                "tooltip_size_options": config.BOOKBUB_TOOLTIP_SIZE_OPTIONS,
                 "active": "settings",
             }
         ),

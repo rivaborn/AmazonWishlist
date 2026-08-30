@@ -113,16 +113,17 @@ def save_settings(
     scrape_time: Optional[str] = Form(None),
     bookbub_time: Optional[str] = Form(None),
     cover_size: Optional[str] = Form(None),
+    tooltip_size: Optional[str] = Form(None),
 ):
     """Save app settings (the Settings tab) — primary only.
 
-    Any of the three fields may be supplied; only supplied values are written,
-    so the BookBub Deals cover-size dropdown (which POSTs just ``cover_size``)
-    reuses this endpoint. Times are persisted as scrape_hour/scrape_minute and
-    bookbub_hour/bookbub_minute (server local) and take effect from the next
-    daily run via scheduler.reschedule_jobs(); the cover size applies on the
-    next page load. PRG: 303 -> /settings on success (the dropdown ignores the
-    redirect and reloads its own page).
+    Any of the fields may be supplied; only supplied values are written, so the
+    BookBub Deals cover-size / tooltip-size dropdowns (which POST just their
+    own field) reuse this endpoint. Times are persisted as
+    scrape_hour/scrape_minute and bookbub_hour/bookbub_minute (server local)
+    and take effect from the next daily run via scheduler.reschedule_jobs(); the
+    cover/tooltip sizes apply on the next page load. PRG: 303 -> /settings on
+    success (the dropdowns ignore the redirect and reload their own page).
     """
     time_changed = False
     st = _parse_hhmm(scrape_time, "scrape_time")
@@ -142,6 +143,13 @@ def save_settings(
                 400, f"cover_size must be one of {config.BOOKBUB_COVER_SIZE_OPTIONS}"
             )
         settings.set("cover_size", cs)
+    if tooltip_size is not None and tooltip_size.strip():
+        ts = tooltip_size.strip()
+        if ts not in config.BOOKBUB_TOOLTIP_SIZE_OPTIONS:
+            raise HTTPException(
+                400, f"tooltip_size must be one of {config.BOOKBUB_TOOLTIP_SIZE_OPTIONS}"
+            )
+        settings.set("tooltip_size", ts)
     if time_changed:
         from .. import scheduler
 

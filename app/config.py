@@ -251,6 +251,11 @@ BOOKBUB_PER_PAGE_DEFAULT = 20
 # `settings` table via app.settings) has not been stored yet.
 BOOKBUB_COVER_SIZE_OPTIONS = ["1x", "2x", "4x"]
 BOOKBUB_COVER_SIZE_DEFAULT = "1x"
+# BookBub Deals description-tooltip text size (custom CSS tooltip, so it is
+# resizable). Stored as a `tooltip_size` setting; the dropdown mirrors
+# cover_size.
+BOOKBUB_TOOLTIP_SIZE_OPTIONS = ["small", "normal", "large"]
+BOOKBUB_TOOLTIP_SIZE_DEFAULT = "normal"
 BOOKBUB_HOUR_DEFAULT = 18
 BOOKBUB_MINUTE_DEFAULT = 0
 

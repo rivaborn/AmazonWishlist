@@ -81,6 +81,38 @@ td.cover-col img.deal-cover.size-4x { width: 256px; }
 table.covers-1x .cover-col { width: 74px; }
 table.covers-2x .cover-col { width: 138px; }
 table.covers-4x .cover-col { width: 266px; }
+
+/* ---------- BookBub description tooltips (custom CSS, resizable) ----------
+   The description was a native `title` attribute, whose font size the browser
+   controls and CSS cannot change. So the template renders a custom CSS tooltip
+   instead (.tip[data-tip], shown via ::after on hover) whose text size the
+   BookBub Deals "Tooltip size" dropdown sets with a `tsize-*` class.
+   Sizes: small/normal/large. */
+.tip { position: relative; display: inline-block; cursor: help; }
+.tip::after {
+  content: attr(data-tip);
+  position: absolute;
+  bottom: 110%;
+  left: 50%;
+  transform: translateX(-50%);
+  background: #1c1c1c;
+  color: #f0f0f0;
+  line-height: 1.4;
+  padding: 6px 9px;
+  border-radius: 4px;
+  white-space: normal;
+  width: max-content;
+  max-width: 260px;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, .35);
+  z-index: 60;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity .15s;
+}
+.tip:hover::after { opacity: 1; }
+.tip.tsize-small::after { font-size: .72rem; }
+.tip.tsize-normal::after { font-size: .85rem; }
+.tip.tsize-large::after { font-size: 1.05rem; }
 td.cb-col input.purchased-cb { cursor: pointer; transform: scale(1.1); }
 td.cb-col input.purchased-cb:disabled { cursor: progress; }
 

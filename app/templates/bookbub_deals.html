@@ -30,6 +30,15 @@
       {% endfor %}
     </select>
   </label>
+  <label class="per-page tooltip-size">
+    Tooltip size
+    <select id="tooltip-size-select"
+            onchange="fetch('/api/settings', {method: 'POST', body: new URLSearchParams({tooltip_size: this.value})}).then(function (r) { if (r.ok) location.reload(); else { console.error('Failed to save tooltip size (HTTP ' + r.status + ')'); } })">
+      {% for opt in tooltip_size_options %}
+      <option value="{{ opt }}"{% if opt == tooltip_size %} selected{% endif %}>{{ opt }}</option>
+      {% endfor %}
+    </select>
+  </label>
   {% endif %}
 </p>
 
@@ -57,9 +66,9 @@
   <tbody>
   {% for r in rows %}
     <tr>
-      <td class="cover-col">{% if r.cover %}<img class="deal-cover size-{{ cover_size }}" src="/covers/{{ r.cover }}" alt="{{ r.title }}"{% if r.description %} title="{{ r.description }}"{% endif %}>{% endif %}</td>
+      <td class="cover-col">{% if r.cover %}{% if r.description %}<span class="tip tsize-{{ tooltip_size }}" data-tip="{{ r.description }}">{% endif %}<img class="deal-cover size-{{ cover_size }}" src="/covers/{{ r.cover }}" alt="{{ r.title }}">{% if r.description %}</span>{% endif %}{% endif %}</td>
       <td class="cb-col"><input type="checkbox" class="hide-cb" data-id="{{ r.id }}" {{ 'checked' if r.hidden else '' }} title="Hide this book from the list"></td>
-      <td><a href="{{ r.amazon_url }}" target="_blank" rel="noopener"{% if r.description %} title="{{ r.description }}"{% endif %}>{{ r.title }}</a></td>
+      <td>{% if r.description %}<a class="tip tsize-{{ tooltip_size }}" href="{{ r.amazon_url }}" target="_blank" rel="noopener" data-tip="{{ r.description }}">{{ r.title }}</a>{% else %}<a href="{{ r.amazon_url }}" target="_blank" rel="noopener">{{ r.title }}</a>{% endif %}</td>
       <td>{{ r.author or '' }}</td>
       <td>{{ r.deal_price or '—' }}</td>
       <td>{{ r.original_price or '—' }}</td>
