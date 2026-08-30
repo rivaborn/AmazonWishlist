@@ -82,8 +82,9 @@ BOOK_COLUMNS = (
 
 # The whole BookBub `deal` table mirrors to a secondary (GET /api/sync/deals).
 # All columns — the mirror duplicates the primary's deals page, including the
-# captured cover filename + description, the owned audit, and the per-row
-# hidden flag (the secondary's own hide toggles are 403 anyway).
+# captured cover filename + description, the captured Amazon star rating + 
+# rating count, the owned audit, and the per-row hidden flag (the secondary's
+# own hide toggles are 403 anyway).
 DEAL_COLUMNS = (
     "id",
     "date",
@@ -102,6 +103,8 @@ DEAL_COLUMNS = (
     "hidden",
     "cover",
     "description",
+    "stars",
+    "ratings",
 )
 
 
