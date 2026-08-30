@@ -256,6 +256,10 @@ BOOKBUB_COVER_SIZE_DEFAULT = "1x"
 # cover_size.
 BOOKBUB_TOOLTIP_SIZE_OPTIONS = ["small", "normal", "large"]
 BOOKBUB_TOOLTIP_SIZE_DEFAULT = "normal"
+# BookBub Deals min-star filter (0 = show all; a positive value shows only
+# deals whose captured Amazon rating is >= that threshold).
+BOOKBUB_MIN_STARS_OPTIONS = [0, 3, 3.5, 4, 4.5]
+BOOKBUB_MIN_STARS_DEFAULT = 0
 BOOKBUB_HOUR_DEFAULT = 18
 BOOKBUB_MINUTE_DEFAULT = 0
 

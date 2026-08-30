@@ -158,17 +158,20 @@ def _cover_ext(url: str) -> str:
 
 
 def extract_page_meta_html(html: str) -> dict:
-    """Parse the book cover URL + description text out of a rendered Amazon
-    product page (pure — offline-testable against a canned HTML string).
+    """Parse the book cover URL, description, star rating and rating count out
+    of a rendered Amazon product page (pure — offline-testable against a canned
+    HTML string).
 
-    Best-effort: never raises; returns ``{"cover_url": str, "description":
-    str}`` with empty strings when either is absent. The cover prefers the
-    ``data-old-hires`` attribute (full-resolution source) over ``src``.
+    Best-effort: never raises; returns ``{"cover_url": str, "description": str,
+    "stars": str, "ratings": str}`` with empty strings when any is absent. The
+    cover prefers the ``data-old-hires`` attribute (full-resolution source) over
+    ``src``; the rating comes from the ``#acrPopover`` "X out of 5 stars"
+    title and the count from ``#acrCustomerReviewText`` ("1,234 ratings").
     """
     try:
         tree = HTMLParser(html or "")
     except Exception:
-        return {"cover_url": "", "description": ""}
+        return {"cover_url": "", "description": "", "stars": "", "ratings": ""}
 
     cover_url = ""
     for sel in COVER_SELECTORS:
@@ -188,7 +191,25 @@ def extract_page_meta_html(html: str) -> dict:
             if description:
                 break
 
-    return {"cover_url": cover_url, "description": description}
+    stars = ""
+    ratings = ""
+    try:
+        node = tree.css_first("#acrPopover") or tree.css_first("[title*='out of 5 stars']")
+        if node is not None:
+            title = (node.attributes or {}).get("title", "")
+            m = re.search(r"([0-5](?:\.[0-9])?)\s*out of 5", title)
+            if m:
+                stars = m.group(1)
+        node = tree.css_first("#acrCustomerReviewText")
+        if node is not None:
+            m = re.search(r"([0-9][0-9,]*)", node.text(strip=True) or "")
+            if m:
+                ratings = m.group(1)
+    except Exception:
+        stars, ratings = "", ""
+
+    return {"cover_url": cover_url, "description": description,
+            "stars": stars, "ratings": ratings}
 
 
 def download_cover(

@@ -53,6 +53,13 @@ def _bookbub_per_page(value: int) -> int:
     return min(config.BOOKBUB_PER_PAGE_OPTIONS, key=lambda o: abs(o - value))
 
 
+def _bookbub_min_stars(value: float) -> float:
+    """Snap an incoming min_stars to the nearest allowed BookBub threshold.
+    """
+    return float(min(config.BOOKBUB_MIN_STARS_OPTIONS,
+                     key=lambda o: abs(o - value)))
+
+
 def _per_page(value: int) -> int:
     return max(PER_PAGE_MIN, min(PER_PAGE_MAX, value))
 
@@ -102,6 +109,7 @@ def bookbub_deals_page(
     show_hidden: bool = Query(False),
     page: int = Query(1, ge=1),
     per_page: int = Query(config.BOOKBUB_PER_PAGE_DEFAULT),
+    min_stars: float = Query(config.BOOKBUB_MIN_STARS_DEFAULT),
 ):
     """Live BookBub deals (data/deals.db, deal_status='current').
 
@@ -120,20 +128,24 @@ def bookbub_deals_page(
     Amazon description as a hover tooltip on BOTH the cover and the title.
     Page size comes from the per-page dropdown (BOOKBUB_PER_PAGE_OPTIONS,
     default 20) and is preserved across pagination and sort links via
-    `?per_page=`. Cover size comes from the stored `cover_size` setting
+    `?per_page=`. `?min_stars=N` filters to deals rated >= N stars (only deals
+    whose rating was captured in the daily check; a value >0 drops unrated
+    rows). Cover size comes from the stored `cover_size` setting
     (Settings tab / the per-page cover-size dropdown, default
     BOOKBUB_COVER_SIZE_DEFAULT) and is applied as a `size-*` class.
     """
     s = _bookbub_sort(sort)
     d = _bookbub_dir(direction)
     pp = _bookbub_per_page(per_page)
+    ms = _bookbub_min_stars(min_stars)
     cover_size = settings.get("cover_size", config.BOOKBUB_COVER_SIZE_DEFAULT)
     tooltip_size = settings.get("tooltip_size", config.BOOKBUB_TOOLTIP_SIZE_DEFAULT)
     conn = deals_db.connect(config.DEALS_DB)
     try:
         deals_db.ensure_schema(conn)  # idempotent (adds verification cols if missing)
         rows = deals_db.sort_deals(
-            deals_db.current_deals(conn, show_hidden=show_hidden), sort=s, direction=d
+            deals_db.current_deals(conn, show_hidden=show_hidden, min_stars=ms),
+            sort=s, direction=d,
         )
     finally:
         conn.close()
@@ -142,7 +154,8 @@ def bookbub_deals_page(
         page=page,
         per_page=pp,
         base_url="/bookbub-deals",
-        extra_query={"sort": s, "dir": d, "show_hidden": show_hidden, "per_page": pp},
+        extra_query={"sort": s, "dir": d, "show_hidden": show_hidden,
+                     "per_page": pp, "min_stars": ms},
     )
     return templates.TemplateResponse(
         request,
@@ -156,6 +169,8 @@ def bookbub_deals_page(
                 "show_hidden": show_hidden,
                 "per_page": pp,
                 "per_page_options": config.BOOKBUB_PER_PAGE_OPTIONS,
+                "min_stars": ms,
+                "min_stars_options": config.BOOKBUB_MIN_STARS_OPTIONS,
                 "cover_size": cover_size,
                 "cover_size_options": config.BOOKBUB_COVER_SIZE_OPTIONS,
                 "cover_size_default": config.BOOKBUB_COVER_SIZE_DEFAULT,

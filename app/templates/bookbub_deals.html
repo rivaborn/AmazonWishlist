@@ -5,15 +5,26 @@
 <p class="hint">BookBub deals verified live on Amazon right now. Expired, unverified, and hidden deals are not shown.
   <label class="show-hidden">
     <input type="checkbox" id="show-hidden-cb" {{ 'checked' if show_hidden else '' }}
-           onchange="location.href = '/bookbub-deals' + (this.checked ? '?show_hidden=1' : '')">
+           onchange="location.href = '/bookbub-deals?min_stars={{ min_stars }}' + (this.checked ? '&amp;show_hidden=1' : '')">
     Show Hidden
   </label>
   <label class="per-page">
     Per page
     <select id="per-page-select"
-            onchange="location.href = '/bookbub-deals?sort={{ sort }}&amp;dir={{ dir }}{% if show_hidden %}&amp;show_hidden=1{% endif %}&amp;per_page=' + this.value">
+            onchange="location.href = '/bookbub-deals?sort={{ sort }}&amp;dir={{ dir }}{% if show_hidden %}&amp;show_hidden=1{% endif %}&amp;per_page=' + this.value + '&amp;min_stars={{ min_stars }}'">
       {% for opt in per_page_options %}
       <option value="{{ opt }}"{% if opt == per_page %} selected{% endif %}>{{ opt }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  {# Min-star rating filter (read-only — a plain query param, so it renders on
+     a mirror too, unlike the write-only cover/tooltip sizes). #}
+  <label class="per-page min-stars">
+    Min rating
+    <select id="min-stars-select"
+            onchange="location.href = '/bookbub-deals?sort={{ sort }}&amp;dir={{ dir }}{% if show_hidden %}&amp;show_hidden=1{% endif %}&amp;per_page={{ per_page }}&amp;min_stars=' + this.value">
+      {% for opt in min_stars_options %}
+      <option value="{{ opt }}"{% if opt == min_stars %} selected{% endif %}>{{ 'All' if opt == 0 else opt ~ '★+' }}</option>
       {% endfor %}
     </select>
   </label>
@@ -58,9 +69,10 @@
       <th class="cover-col"></th>
       <th class="cb-col"></th>
       <th>Title</th><th>Author</th>
-      <th><a href="/bookbub-deals?sort=price&dir={{ price_next }}" class="{{ 'sort-active' if sort == 'price' }}">Deal price{% if sort == 'price' %} {{ '▲' if dir == 'asc' else '▼' }}{% endif %}</a></th>
+      <th><a href="/bookbub-deals?sort=price&dir={{ price_next }}&amp;min_stars={{ min_stars }}" class="{{ 'sort-active' if sort == 'price' }}">Deal price{% if sort == 'price' %} {{ '▲' if dir == 'asc' else '▼' }}{% endif %}</a></th>
       <th>Regular price</th>
-      <th><a href="/bookbub-deals?sort=date&dir={{ date_next }}" class="{{ 'sort-active' if sort == 'date' }}">Date of Deal{% if sort == 'date' %} {{ '▲' if dir == 'asc' else '▼' }}{% endif %}</a></th>
+      <th><a href="/bookbub-deals?sort=date&dir={{ date_next }}&amp;min_stars={{ min_stars }}" class="{{ 'sort-active' if sort == 'date' }}">Date of Deal{% if sort == 'date' %} {{ '▲' if dir == 'asc' else '▼' }}{% endif %}</a></th>
+      <th>Stars</th>
     </tr>
   </thead>
   <tbody>
@@ -73,6 +85,7 @@
       <td>{{ r.deal_price or '—' }}</td>
       <td>{{ r.original_price or '—' }}</td>
       <td class="ts">{{ r.date }}</td>
+      <td class="stars">{% if r.stars %}{{ r.stars }}★ <span class="rt">({{ '{:,}'.format(r.ratings) if r.ratings else '' }})</span>{% else %}—{% endif %}</td>
     </tr>
   {% endfor %}
   </tbody>

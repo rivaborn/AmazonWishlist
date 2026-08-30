@@ -75,7 +75,9 @@ CREATE TABLE IF NOT EXISTS deal (
     verified_at        TEXT,                                   -- ISO time of the last live check
     hidden             INTEGER NOT NULL DEFAULT 0,             -- 1 when the user hid it from the BookBub Deals tab
     cover              TEXT,                                   -- book cover filename in data/covers/ (NULL when never captured)
-    description        TEXT                                    -- Amazon book description captured during verification (NULL when never captured)
+    description        TEXT,                                   -- Amazon book description captured during verification (NULL when never captured)
+    stars              REAL,                                   -- Amazon star rating (0-5, e.g. 4.5) captured during verification (NULL when never captured)
+    ratings            INTEGER                                 -- Amazon rating count captured during verification (NULL when never captured)
 );
 CREATE UNIQUE INDEX IF NOT EXISTS uq_deal_date_bub ON deal(date, bookbub_url);
 """
@@ -97,6 +99,10 @@ def _migrate(conn: sqlite3.Connection) -> None:
     for col in ("deal_status", "current_price", "verified_at", "cover", "description"):
         if col not in cols:
             conn.execute(f"ALTER TABLE deal ADD COLUMN {col} TEXT")
+    if "stars" not in cols:
+        conn.execute("ALTER TABLE deal ADD COLUMN stars REAL")
+    if "ratings" not in cols:
+        conn.execute("ALTER TABLE deal ADD COLUMN ratings INTEGER")
     if "hidden" not in cols:
         conn.execute("ALTER TABLE deal ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0")
 
@@ -481,12 +487,36 @@ def update_cover_desc(
     )
 
 
-def current_deals(conn: sqlite3.Connection, show_hidden: bool = False) -> list[dict]:
+def update_rating(
+    conn: sqlite3.Connection,
+    row_id: int,
+    stars: float | int | str | None,
+    ratings: int | str | None,
+) -> None:
+    """Persist the Amazon star rating + rating count captured during a check
+    (the caller commits).
+
+    ``stars`` is the rating in 0-5 (e.g. 4.5), ``ratings`` the number of
+    ratings. Either may be None when the page didn't carry it — a None is
+    stored as NULL, never clobbering the other field. Called from the
+    verification loop — best-effort.
+    """
+    conn.execute(
+        "UPDATE deal SET stars = ?, ratings = ? WHERE id = ?",
+        (float(stars) if stars not in (None, "") else None,
+         int(str(ratings).replace(",", "")) if ratings not in (None, "") else None,
+         row_id),
+    )
+
+
+def current_deals(
+    conn: sqlite3.Connection, show_hidden: bool = False, min_stars: float = 0.0
+) -> list[dict]:
     """Live BookBub deals for the web app's BookBub Deals tab.
 
     Returns ``{id, title, author, date, deal_price, deal_price_cents,
-    original_price, amazon_url, hidden, cover, description}`` dicts for every row the app
-    presents as an in-flight deal:
+    original_price, amazon_url, hidden, cover, description, stars,
+    ratings}`` dicts for every row the app presents as an in-flight deal:
     ``deal_status`` is ``current`` (verified live on Amazon), ``amazon_url``
     is present (the tab links the title to Amazon), and the book is **not**
     owned in Grimmory (``owned_in_grimmory`` is 0 or NULL/unknown — avoid
@@ -502,19 +532,25 @@ def current_deals(conn: sqlite3.Connection, show_hidden: bool = False) -> list[d
     render the per-row hide checkbox. ``cover`` is the captured cover image
     filename (``data/covers/``; None when never captured) and ``description``
     the captured Amazon description text (shown as a hover tooltip), both
-    None when the page has never been verified.
+    None when the page has never been verified. ``stars`` (float 0-5) and
+    ``ratings`` (int) are the Amazon rating captured on the last check (None
+    when a page never carried them). ``min_stars`` filters to rows whose
+    ``stars >= min_stars`` (rows with no rating are excluded when
+    ``min_stars`` > 0; ``min_stars`` 0 or negative shows all).
     """
     rows = conn.execute(
         "SELECT id, date, title, author, deal_price, original_price, amazon_url, "
-        "hidden, cover, description "
+        "hidden, cover, description, stars, ratings "
         "FROM deal WHERE deal_status = ? AND amazon_url IS NOT NULL "
         "AND owned_in_grimmory IS NOT 1 "
         "AND (hidden = 0 OR ? = 1) "
+        "AND (? <= 0 OR (stars IS NOT NULL AND stars >= ?)) "
         "ORDER BY date DESC, id DESC",
-        (DEAL_STATUS_CURRENT, int(show_hidden)),
+        (DEAL_STATUS_CURRENT, int(show_hidden), min_stars, min_stars),
     ).fetchall()
     out: list[dict] = []
-    for row_id, date, title, author, deal_price, original_price, amazon_url, hidden, cover, description in rows:
+    for (row_id, date, title, author, deal_price, original_price, amazon_url,
+         hidden, cover, description, stars, ratings) in rows:
         out.append(
             {
                 "id": row_id,
@@ -528,6 +564,8 @@ def current_deals(conn: sqlite3.Connection, show_hidden: bool = False) -> list[d
                 "hidden": hidden,
                 "cover": cover,
                 "description": description,
+                "stars": stars,
+                "ratings": ratings,
             }
         )
     return out
