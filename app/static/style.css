@@ -93,16 +93,20 @@ table.covers-4x .cover-col { width: 266px; }
   content: attr(data-tip);
   position: absolute;
   bottom: 110%;
-  left: 50%;
-  transform: translateX(-50%);
+  /* Anchor to the element's LEFT edge and let the box extend rightward into
+     the page. The old centered (left:50%; translateX(-50%)) placement clipped
+     off-screen for the left-anchored cover, and the 260px cap made long
+     descriptions into very tall boxes. Wide + viewport-capped = always fits. */
+  left: 0;
+  width: max-content;
+  max-width: min(500px, 92vw);
+  white-space: normal;
+  overflow-wrap: anywhere;   /* break long unbroken text so it never clips */
   background: #1c1c1c;
   color: #f0f0f0;
   line-height: 1.4;
   padding: 6px 9px;
   border-radius: 4px;
-  white-space: normal;
-  width: max-content;
-  max-width: 260px;
   box-shadow: 0 2px 6px rgba(0, 0, 0, .35);
   z-index: 60;
   opacity: 0;
