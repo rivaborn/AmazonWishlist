@@ -329,8 +329,13 @@ NORDVPN_START_COUNTRY = os.environ.get(
     "NORDVPN_START_COUNTRY", NORDVPN_COUNTRIES[0] if NORDVPN_COUNTRIES else "United States"
 )
 # Books per exit IP / fingerprint pair before a NordVPN rotation (the
-# scripts/verify_deals.py --rotate-every default).
-NORDVPN_ROTATE_EVERY = int(os.environ.get("NORDVPN_ROTATE_EVERY", "10"))
+# scripts/verify_deals.py --rotate-every default). DORMANT by default: the
+# tunnel's exit IP is fixed for its life, and the `wishlist` user has no
+# sudoers rule to `systemctl restart amazon-wishlist-vpn.service`, so rotation
+# never succeeds (it just logs "fingerprint-only rotation" every N books).
+# Defanged via a huge default; to actually rotate later, set it back to a real
+# N (e.g. 10) AND grant the restart in install_systemd.sh's scoped rule.
+NORDVPN_ROTATE_EVERY = int(os.environ.get("NORDVPN_ROTATE_EVERY", "1000000"))
 
 # ---------- NordVPN netns tunnel (app/nordvpn.py "tunnel mode") ----------
 # The Ubuntu deployment puts the live-deal verifier INSIDE a network namespace

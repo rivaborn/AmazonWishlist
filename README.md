@@ -585,7 +585,7 @@ The BookBub credentials and session link are never committed (the credentials ar
 | `NORDVPN_CLI` | `nordvpn` | Path to the NordVPN CLI (override if it is not on `PATH`). |
 | `NORDVPN_START_COUNTRY` | first of `NORDVPN_COUNTRIES` | Starting exit country for `verify_deals.py` (`nordvpn connect`). |
 | `NORDVPN_COUNTRIES` | `United States,Germany,Japan,United Kingdom,Canada,Australia` | Exit-country pool the verifier rotates through (`nordvpn rotate`), comma-separated. |
-| `NORDVPN_ROTATE_EVERY` | `10` | Books per exit IP / fingerprint pair before a rotation (the `--rotate-every` default) — the 10-per-IP budget. |
+| `NORDVPN_ROTATE_EVERY` | `1000000` | Books per exit IP / fingerprint pair before an IP rotation (the `--rotate-every` default). **Dormant by default** (effectively never): in `--netns` tunnel mode the exit IP is fixed for the tunnel's life and the `wishlist` user has no sudoers rule to restart the tunnel unit, so rotation can't succeed anyway — it just logs "fingerprint-only rotation" and keeps the IP. To actually rotate, set a real N and grant `systemctl restart amazon-wishlist-vpn.service` in the scoped rule. |
 | `VERIFY_DELAY_MIN` / `VERIFY_DELAY_MAX` | `2` / `6` | Jitter range (seconds) between per-book Amazon reads (anti-bot pacing). |
 | `VERIFY_MAX_RETRIES` / `VERIFY_RETRY_BACKOFF` | `2` / `20` | Per-book retry budget for transient failures (block page / navigation failure / no price) and the backoff sleep between retries. |
 | `VERIFY_PROGRESS` | `data/verify_progress.json` | Advisory progress mirror for the verifier (atomic writes; gitignored via `data/`). The resume cursor is `deal_status` in `DEALS_DB`, not this file. |
