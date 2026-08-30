@@ -23,10 +23,18 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 
 import httpx
 
 from . import config, sync
+
+# The deals payload ships every cover as base64 in one response (~tens of MB)
+# and intermittently fails with httpx's "Server disconnected" on a large/slow
+# transfer. Retry a few times (it almost always succeeds on a retry) so a
+# transient failure never skips the deals mirror for an entire run.
+DEALS_PULL_RETRIES = 3
+DEALS_PULL_RETRY_BACKOFF = 2.0  # seconds, multiplied by the attempt
 
 log = logging.getLogger(__name__)
 
@@ -142,17 +150,31 @@ def _pull_deals(client: httpx.Client) -> int:
     sync down: a 404 (a primary that predates /api/sync/deals) logs at INFO,
     and any other fetch/JSON/apply failure logs a warning — both return 0
     and the rest of the sync completes.
+
+    The payload ships every cover as base64 in ONE response (~tens of MB),
+    which intermittently fails with httpx's "Server disconnected" on a slow/
+    large transfer. We retry a few times with backoff (it almost always
+    succeeds on a retry) so a transient failure never skips the deals mirror
+    for an entire run, and use a much larger read timeout for the request.
     """
-    try:
-        r = client.get("/api/sync/deals")
-        r.raise_for_status()
-        payload = r.json()
-    except (httpx.HTTPError, ValueError) as e:
-        if isinstance(e, httpx.HTTPStatusError) and e.response.status_code == 404:
-            log.info("primary has no /api/sync/deals (older version); skipping the deals mirror")
-        else:
-            log.warning("deals mirror skipped this run: %s", e)
-        return 0
+    payload = None
+    for attempt in range(DEALS_PULL_RETRIES):
+        try:
+            r = client.get("/api/sync/deals", timeout=httpx.Timeout(300.0, connect=10.0))
+            r.raise_for_status()
+            payload = r.json()
+            break
+        except (httpx.HTTPError, ValueError) as e:
+            if isinstance(e, httpx.HTTPStatusError) and e.response.status_code == 404:
+                log.info("primary has no /api/sync/deals (older version); skipping the deals mirror")
+                return 0
+            if attempt < DEALS_PULL_RETRIES - 1:
+                log.warning("deals mirror pull failed (attempt %d/%d): %s; retrying",
+                            attempt + 1, DEALS_PULL_RETRIES, e)
+                time.sleep(DEALS_PULL_RETRY_BACKOFF * (attempt + 1))
+            else:
+                log.warning("deals mirror skipped this run: %s", e)
+                return 0
     if "deals" not in payload:  # malformed / unexpected payload shape
         log.warning("deals payload missing the 'deals' key; skipping the deals mirror")
         return 0
