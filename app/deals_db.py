@@ -164,14 +164,46 @@ def normalise(text: str | None) -> str:
     return t.strip()
 
 
+def _build_owned_index(grimmory_rows) -> dict:
+    """Index grimmory rows for owned-lookup: ``author_key -> [title_key, ...]``.
+
+    Titles/authors are run through :func:`_owned_title_key` (parenthetical
+    stripped, diacritics removed, normalised). Grouping by author keeps each
+    deal's lookup small (only same-author Grimmory titles are compared).
+    """
+    idx: dict = {}
+    for title, author in grimmory_rows:
+        idx.setdefault(_owned_title_key(author), []).append(_owned_title_key(title))
+    return idx
+
+
+def _is_owned(index: dict, title, author) -> bool:
+    """True when (title, author) matches a grimmory entry in ``index``.
+
+    Requires the normalised (paren/diacritic-stripped, :func:`_owned_title_key`)
+    author to be EQUAL, and the normalised title to be EQUAL *or* a word-aligned
+    prefix of the other — so a short BookBub title ("Witch World: High Hallack
+    Cycle") matches a Grimmory title that expands it with a colon/parenthetical
+    subtitle ("...: The Jargoon Pard, …"). The exact-author requirement keeps
+    unrelated title collisions (e.g. two different "Across the Universe" books)
+    from being hidden.
+    """
+    tk = _owned_title_key(title)
+    for gtk in index.get(_owned_title_key(author), ()):
+        if tk == gtk or tk.startswith(gtk + " ") or gtk.startswith(tk + " "):
+            return True
+    return False
+
+
 def owned_lookup(deals, grimmory_path: str | Path) -> dict:
     """Map each deal's ``bookbub_url`` -> owned (``1``/``0``), or ``None``.
 
     Reads ``grimmory.db``'s ``book(title, author)`` rows (read-only) and marks
-    a deal owned (``1``) when *any* grimmory book matches on **normalised
-    title AND normalised author**; otherwise ``0``. If the grimmory DB file is
-    missing, every deal maps to ``None`` (stored as NULL — the audit column is
-    left blank rather than raising a hard failure).
+    a deal owned (``1``) when *any* grimmory book matches its normalised author
+    and an exact-or-prefix normalised title (see :func:`_is_owned`); otherwise
+    ``0``. If the grimmory DB file is missing, every deal maps to ``None``
+    (stored as NULL — the audit column is left blank rather than raising a hard
+    failure).
     """
     grimmory_path = Path(grimmory_path)
     if not grimmory_path.exists():
@@ -183,16 +215,8 @@ def owned_lookup(deals, grimmory_path: str | Path) -> dict:
     finally:
         conn.close()
 
-    # Normalised title+author, but with parenthetical subtitles stripped from
-    # the title (see _owned_title_key) so a Grimmory title carrying an appended
-    # series/subtitle still matches the shorter BookBub deal title.
-    owned_pairs = {(_owned_title_key(t), normalise(a)) for (t, a) in rows}
-    result = {}
-    for d in deals:
-        result[d.url] = (
-            1 if (_owned_title_key(d.title), normalise(d.author)) in owned_pairs else 0
-        )
-    return result
+    index = _build_owned_index(rows)
+    return {d.url: 1 if _is_owned(index, d.title, d.author) else 0 for d in deals}
 
 
 def refresh_owned(conn: sqlite3.Connection, grimmory_path: str | Path) -> int:

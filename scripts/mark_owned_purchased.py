@@ -43,20 +43,16 @@ def main() -> int:
         print(f"ERROR: no wishlist DB at {args.wishlist_db}", file=sys.stderr)
         return 2
 
-    # Membership set of owned (paren-stripped+normalised title, paren-stripped
-    # +normalised author). The author circle is stripped too because Amazon
-    # wishlist authors carry the edition format as a parenthetical ("Iain M.
-    # Banks (Mass Market Paperback)") that the Grimmory author lacks.
+    # Index grimmory rows with the shared ownership matcher (paren-stripped +
+    # normalised title/author, exact-or-prefix) so the wishlist scan stays
+    # consistent with the BookBub deals owned-lookup.
     g = sqlite3.connect(f"file:{Path(args.grimmory_db).as_posix()}?mode=ro", uri=True)
     try:
         grimm = g.execute("SELECT title, author FROM book").fetchall()
     finally:
         g.close()
-    owned = {
-        (deals_db._owned_title_key(t), deals_db._owned_title_key(a))
-        for (t, a) in grimm
-    }
-    print(f"grimmory owned-set: {len(owned)} book(s)")
+    index = deals_db._build_owned_index(grimm)
+    print(f"grimmory owned-set: {len(grimm)} book(s)")
 
     d = sqlite3.connect(args.wishlist_db)
     try:
@@ -69,9 +65,7 @@ def main() -> int:
     already = sum(1 for (_a, _t, _au, p) in books if p)
     to_mark = [
         asin for (asin, title, author, p) in books
-        if not p and (
-            (deals_db._owned_title_key(title), deals_db._owned_title_key(author)) in owned
-        )
+        if not p and deals_db._is_owned(index, title, author)
     ]
     print(f"wishlist books: {total} total, {already} already purchased")
     print(f"owned and NOT yet purchased: {len(to_mark)}")
