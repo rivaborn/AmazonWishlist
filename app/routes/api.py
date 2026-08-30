@@ -132,8 +132,11 @@ def save_settings(
       mirror never schedules a run, and the Settings page itself stays
       primary-only.
 
-    PRG: 303 -> /settings on success (the dropdowns ignore the redirect and
-    reload their own page).
+    PRG: the Settings TAB form (which always includes the time fields)
+    redirects 303 -> /settings; a display-only POST from the size dropdowns
+    returns 200 with no redirect — so fetch() sees an ok response on a mirror
+    too (a 303 -> /settings would be followed by fetch() to GET /settings,
+    which is 403 on a mirror, making r.ok false and the dropdown never apply).
     """
     secondary = config.is_secondary()
     if secondary and (scrape_time is not None or bookbub_time is not None):
@@ -142,6 +145,7 @@ def save_settings(
             "run-time settings are primary-only; a mirror may only set its local "
             "display preferences (cover_size / tooltip_size)",
         )
+    had_times = scrape_time is not None or bookbub_time is not None
     time_changed = False
     if not secondary:
         st = _parse_hhmm(scrape_time, "scrape_time")
@@ -172,4 +176,6 @@ def save_settings(
         from .. import scheduler
 
         scheduler.reschedule_jobs()
-    return RedirectResponse(url="/settings", status_code=303)
+    if had_times:
+        return RedirectResponse(url="/settings", status_code=303)
+    return JSONResponse({"ok": True})
