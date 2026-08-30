@@ -245,12 +245,11 @@ def _launch_args() -> list[str]:
     return ["--disable-blink-features=AutomationControlled", "--no-default-browser-check"]
 
 
-def _wait_past_challenge(page, timeout_s: float = 60.0) -> bool:
-    """Poll until the page title is no longer the Cloudflare interstitial."""
+def _wait_past_challenge(page, timeout_s: float = 90.0) -> bool:
+    """Poll until Cloudflare's managed challenge is gone (see ``_is_challenged``)."""
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
-        title = (page.title() or "").lower()
-        if "just a moment" not in title:
+        if not _is_challenged(page):
             return True
         time.sleep(1.5)
     return False
@@ -268,10 +267,15 @@ def _on_daily_deals_for_date(page, date: str) -> bool:
 
 
 def _load_deals(page) -> None:
-    """Wait for the Cloudflare challenge to clear and the deal cards to render."""
+    """Wait for the Cloudflare challenge to clear and the deal cards to render.
+
+    A headed pass under a trusted IP can sit in the managed challenge (or its
+    Turnstile iframe) for tens of seconds, so the selector wait is generous
+    (90s) rather than the earlier 20s the challenge routinely exceeded.
+    """
     _wait_past_challenge(page)
     try:
-        page.wait_for_selector(CARD, timeout=25_000)
+        page.wait_for_selector(CARD, timeout=90_000)
     except Exception:
         pass  # blocked or empty; parse will yield [] and the caller retries
     time.sleep(2)
@@ -287,9 +291,9 @@ def _login(page, username: str, password: str) -> None:
     just re-serves the login form — the subsequent daily-deals navigation will
     then find no deals and the caller surfaces a clean error.
     """
-    page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=60_000)
+    page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=90_000)
     _wait_past_challenge(page)
-    page.wait_for_selector(LOGIN_EMAIL_SEL, timeout=20_000)
+    page.wait_for_selector(LOGIN_EMAIL_SEL, timeout=120_000)
     page.fill(LOGIN_EMAIL_SEL, username)
     page.fill(LOGIN_PASSWORD_SEL, password)
     page.click(LOGIN_SUBMIT_SEL)
@@ -353,8 +357,24 @@ def fetch_daily_deals_playwright(
 
 
 def _is_challenged(page) -> bool:
-    """True if the page is (still) the Cloudflare "Just a moment…" interstitial."""
-    return "just a moment" in (page.title() or "").lower()
+    """True if the page is (still) under Cloudflare's managed challenge.
+
+    Covers both the classic "Just a moment…" interstitial (title check) and
+    the modern Turnstile widget, which renders a ``challenges.cloudflare.com``
+    iframe inside an otherwise non-challenge-titled page. Being conservative
+    (returning True when unsure) makes a caller wait a little longer rather
+    than proceeding while still blocked.
+    """
+    try:
+        if "just a moment" in (page.title() or "").lower():
+            return True
+        for f in page.frames:
+            url = (f.url or "").lower()
+            if "challenges.cloudflare.com" in url or "challenge-platform" in url:
+                return True
+    except Exception:
+        return True
+    return False
 
 
 def fetch_daily_deals_many(
