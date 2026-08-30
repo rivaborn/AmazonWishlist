@@ -81,11 +81,12 @@ ORIGINAL_PRICE = ".deal-price .original-price"
 AMAZON_RETAILER_HREF_MARK = "retailer_id=1"
 
 # ---- Account-login selectors (validated once against the live login page) --
-# BookBub's account login lives at /login with a standard email + password
-# form. If BookBub's markup drifts, adjust the selectors HERE (one place) and
-# the daily updater + probe inherit the fix automatically — same convention as
-# the deal-card selectors above.
-LOGIN_URL = f"{_BASE}/login"
+# BookBub's account login lives at /users/sign_in with a standard email +
+# password form (the old /login now 404s -> 'Page Not Found - BookBub'). If
+# BookBub's markup drifts, adjust the selectors HERE (one place) and the
+# daily updater + probe inherit the fix automatically — same convention as the
+# deal-card selectors above.
+LOGIN_URL = f"{_BASE}/users/sign_in"
 LOGIN_EMAIL_SEL = "input[type='email']"
 LOGIN_PASSWORD_SEL = "input[type='password']"
 LOGIN_SUBMIT_SEL = "input[type='submit'], button[type='submit']"
