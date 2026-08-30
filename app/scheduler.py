@@ -6,7 +6,9 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 from . import config, settings
-from .config import BOOKBUB_HOUR_DEFAULT, BOOKBUB_MINUTE_DEFAULT, LOG_PATH, SCRAPE_HOUR, SCRAPE_MINUTE, SYNC_HOUR, SYNC_MINUTE
+from .config import (BOOKBUB_HOUR_DEFAULT, BOOKBUB_MINUTE_DEFAULT, LOG_PATH,
+   SCRAPE_HOUR, SCRAPE_MINUTE, SYNC_HOUR, SYNC_MINUTE,
+   OWNED_UPDATE_DAY, OWNED_UPDATE_HOUR, OWNED_UPDATE_MINUTE)
 from .services import run_full_scrape
 
 log = logging.getLogger(__name__)
@@ -131,6 +133,20 @@ def start_scheduler() -> BackgroundScheduler:
             run_bookbub,
             trigger=CronTrigger(hour=bookbub_hour, minute=bookbub_minute),
             id="bookbub_daily",
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+        )
+        # Monthly "Update Owned Books" (refresh grimmory.db + move owned books to
+        # Purchased) on the 1st, off-peak. Runs on the HOST (the Grimmory server
+        # is unreachable from the netns); it is long, so it runs in a background
+        # thread. Lazy import: owned_update pulls grimmory/build deps.
+        from . import owned_update  # noqa: E402
+        sched.add_job(
+            owned_update.trigger_owned_update,
+            trigger=CronTrigger(day=OWNED_UPDATE_DAY, hour=OWNED_UPDATE_HOUR,
+                                minute=OWNED_UPDATE_MINUTE),
+            id="owned_update",
             replace_existing=True,
             max_instances=1,
             coalesce=True,

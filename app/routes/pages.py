@@ -222,6 +222,8 @@ def settings_page(request: Request):
     bookbub_m = settings.get_int("bookbub_minute", config.BOOKBUB_MINUTE_DEFAULT)
     cover_size = settings.get("cover_size", config.BOOKBUB_COVER_SIZE_DEFAULT)
     tooltip_size = settings.get("tooltip_size", config.BOOKBUB_TOOLTIP_SIZE_DEFAULT)
+    from .. import owned_update
+    owned_status = owned_update.owned_update_status()
     return templates.TemplateResponse(
         request,
         "settings.html",
@@ -233,6 +235,7 @@ def settings_page(request: Request):
                 "cover_size_options": config.BOOKBUB_COVER_SIZE_OPTIONS,
                 "tooltip_size": tooltip_size,
                 "tooltip_size_options": config.BOOKBUB_TOOLTIP_SIZE_OPTIONS,
+                "owned_status": owned_status,
                 "active": "settings",
             }
         ),

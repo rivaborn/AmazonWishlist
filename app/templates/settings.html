@@ -28,6 +28,33 @@
   </label>
   <button type="submit">Save</button>
 </form>
+
+<h3 style="margin-top:1.6rem">Grimmory owned books</h3>
+<form method="post" action="/api/owned/update">
+  <button type="submit">Update Owned Books</button>
+</form>
+<p class="hint">Fetches your Grimmory libraries into the local grimmory.db, then moves
+  wishlist books you own from the lists to the <strong>Purchased</strong> tab and refreshes the
+  BookBub deals owned flags. Also runs automatically on the 1st of each month. Needs the
+  GRIMMORY_USERNAME / GRIMMORY_PASSWORD settings configured; a run takes a few minutes and
+  runs in the background — reload this page to see when it finishes.</p>
+<p class="hint">
+  {% if owned_status.running %}
+    <span class="owned-running">▶ Update Owned Books is running (started {{ owned_status.started_at or '…' }}).</span>
+  {% else %}
+    {% if owned_status.last_success_at %}
+      Last successful run: <strong>{{ owned_status.last_success_at }}</strong>
+      {% if owned_status.last_result %} — {{ owned_status.last_result.grimmory_books }} grimmory books,
+      {{ owned_status.last_result.marked_purchased }} marked purchased,
+      {{ owned_status.last_result.deals_refreshed }} deals refreshed{% endif %}
+    {% else %}
+      No owned-books update has run yet.
+    {% endif %}
+    {% if owned_status.last_error %}
+      <br>Last attempt failed: <span class="owned-error">{{ owned_status.last_error }}</span>
+    {% endif %}
+  {% endif %}
+</p>
 <p class="hint">The BookBub time runs the whole daily cycle at one time (the same time for all):
   fetch the day's BookBub deals, update the owned-in-grimmory flags, remove duplicates, and
   re-verify every non-expired deal against live Amazon prices — through the NordVPN tunnel,

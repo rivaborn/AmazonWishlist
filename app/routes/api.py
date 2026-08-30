@@ -179,3 +179,16 @@ def save_settings(
     if had_times:
         return RedirectResponse(url="/settings", status_code=303)
     return JSONResponse({"ok": True})
+
+
+@router.post("/owned/update", dependencies=[Depends(_require_primary)])
+def owned_update_run():
+    """Trigger "Update Owned Books": refresh grimmory.db from Grimmory and move
+    owned books to Purchased. Primary-only (mirrors are read-only). Long-running,
+    so it runs in a background thread (see app.owned_update); this endpoint just
+    kicks it off and PRG-reloads the Settings tab, which shows the run status.
+    """
+    from .. import owned_update
+
+    owned_update.trigger_owned_update()
+    return RedirectResponse(url="/settings", status_code=303)

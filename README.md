@@ -378,7 +378,7 @@ The deals mirror needs **no** recovery action: it holds no cursor and no local s
 
 ## Grimmory book catalog (data/grimmory.db)
 
-A one-off export of the home-lab **Grimmory** (BookLore) ebook libraries into this repo's `data/` directory. It is a separate SQLite file from `wishlist.db` with its own schema — a static catalog snapshot (title, author, publisher, date published, ISBN). Nothing in the web app reads or writes it; it is rebuilt by hand, not on a cron.
+A one-off export of the home-lab **Grimmory** (BookLore) ebook libraries into this repo's `data/` directory. It is a separate SQLite file from `wishlist.db` with its own schema — a static catalog snapshot (title, author, publisher, date published, ISBN). The web app reads it (see "Update Owned Books" below) but never writes it directly; it is rebuilt from Grimmory by `scripts/build_grimmory_db.py`, run manually OR automatically: on the 1st of each month, and on demand via the **"Update Owned Books"** button on the Settings tab.
 
 `scripts/build_grimmory_db.py` logs into the Grimmory instance (JWT login via `POST /api/v1/auth/login`, see `app/grimmory.py`), resolves the target libraries by name, fetches every book per library (`GET /api/v1/libraries/{id}/book`), and rebuilds the `book` table in a single transaction (staging table renamed over the old one, so a failed run rolls back and the previous data is left intact):
 
@@ -570,6 +570,7 @@ The BookBub credentials and session link are never committed (the credentials ar
 | `BOOKBUB_TOOLTIP_SIZE_OPTIONS` | `['small', 'normal', 'large']` | The description-tooltip text-size options for the BookBub Deals tab dropdown (a config constant in `app/config.py`, not env-driven — edit it there). The *chosen* size is a stored runtime setting, not an env var. |
 | `BOOKBUB_TOOLTIP_SIZE_DEFAULT` | `normal` | Default tooltip text size for the BookBub Deals tab (same constant in `app/config.py`). |
 | `BOOKBUB_MIN_STARS_OPTIONS` | `[0, 3, 3.5, 4, 4.5]` | The min-star thresholds offered by the BookBub Deals "Min rating" filter (0 = show all; a config constant in `app/config.py`, not env-driven — edit it there). |
+| `OWNED_UPDATE_DAY` / `OWNED_UPDATE_HOUR` / `OWNED_UPDATE_MINUTE` | `1` / `3` / `0` | When the monthly "Update Owned Books" scheduled run fires (server-local; default 1st of the month at 03:00). It is also triggerable on demand from the Settings tab. |
 | `BOOKBUB_MIN_STARS_DEFAULT` | `0` | Default min-star filter for the BookBub Deals tab (same constant in `app/config.py`). |
 | `BOOKBUB_HOUR_DEFAULT` / `BOOKBUB_MINUTE_DEFAULT` | `18` / `0` | Default daily time for the BookBub run. The time is **configurable at runtime in the Settings tab**; a stored setting overrides these defaults. |
 | `BOOKBUB_BACKFILL_START` | `20260826` | Newest day the backfill processes, `YYYYMMDD`. |

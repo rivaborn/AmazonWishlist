@@ -121,6 +121,8 @@ table.covers-4x .cover-col { width: 266px; }
 .tip.tsize-small::after { font-size: .72rem; }
 .tip.tsize-normal::after { font-size: .85rem; }
 .tip.tsize-large::after { font-size: 1.05rem; }
+.owned-running { color: var(--accent); font-weight: 600; }
+.owned-error { color: #e06c75; }
 td.cb-col input.purchased-cb { cursor: pointer; transform: scale(1.1); }
 td.cb-col input.purchased-cb:disabled { cursor: progress; }
 

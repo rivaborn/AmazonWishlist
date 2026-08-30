@@ -260,6 +260,12 @@ BOOKBUB_TOOLTIP_SIZE_DEFAULT = "normal"
 # deals whose captured Amazon rating is >= that threshold).
 BOOKBUB_MIN_STARS_OPTIONS = [0, 3, 3.5, 4, 4.5]
 BOOKBUB_MIN_STARS_DEFAULT = 0
+# Monthly "Update Owned Books": refresh grimmory.db from Grimmory and move
+# owned books to Purchased. Day of month + server-local time (default: 1st @
+# 03:00). Also triggerable on demand from the Settings tab.
+OWNED_UPDATE_DAY = int(os.environ.get("OWNED_UPDATE_DAY", "1"))
+OWNED_UPDATE_HOUR = int(os.environ.get("OWNED_UPDATE_HOUR", "3"))
+OWNED_UPDATE_MINUTE = int(os.environ.get("OWNED_UPDATE_MINUTE", "0"))
 BOOKBUB_HOUR_DEFAULT = 18
 BOOKBUB_MINUTE_DEFAULT = 0
 
