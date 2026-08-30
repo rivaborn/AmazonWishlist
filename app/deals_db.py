@@ -120,6 +120,25 @@ def connect(path: str | Path) -> sqlite3.Connection:
 # --------------------------------------------------------------------------- #
 _PUNCT_RE = re.compile(r"[^\w\s]+", re.UNICODE)
 _WS_RE = re.compile(r"\s+")
+# Parenthetical groups removed before the ownership title comparison — Amazon/
+# Grimmory titles frequently append the series name or subtitle as a trailing
+# parenthetical ("Stone's Throw (A Jesse Stone Novel)") that the BookBub deal
+# title omits. Stripping just the parenthetical is a SAFE relaxation: unlike a
+# word-prefix match it does not collapse "The Hunter" against "The Hunter's
+# Wife" (a real false positive) — the two titles only converge once the
+# additive parenthetical is gone.
+_PARENS_RE = re.compile(r"\s*\([^)]*\)\s*")
+
+
+def _owned_title_key(text: str | None) -> str:
+    """Normalised title for the owned-in-grimmory match (parentheticals
+    stripped). Plain :func:`normalise` keeps them, so ``"X (Subtitle)"`` would
+    never equal ``"X"`` and owned books with an appended series/subtitle
+    slipped through the exact match.
+    """
+    if not text:
+        return ""
+    return normalise(_PARENS_RE.sub(" ", text))
 
 
 def normalise(text: str | None) -> str:
@@ -157,10 +176,15 @@ def owned_lookup(deals, grimmory_path: str | Path) -> dict:
     finally:
         conn.close()
 
-    owned_pairs = {(normalise(t), normalise(a)) for (t, a) in rows}
+    # Normalised title+author, but with parenthetical subtitles stripped from
+    # the title (see _owned_title_key) so a Grimmory title carrying an appended
+    # series/subtitle still matches the shorter BookBub deal title.
+    owned_pairs = {(_owned_title_key(t), normalise(a)) for (t, a) in rows}
     result = {}
     for d in deals:
-        result[d.url] = 1 if (normalise(d.title), normalise(d.author)) in owned_pairs else 0
+        result[d.url] = (
+            1 if (_owned_title_key(d.title), normalise(d.author)) in owned_pairs else 0
+        )
     return result
 
 
