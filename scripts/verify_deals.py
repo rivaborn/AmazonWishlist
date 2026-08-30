@@ -143,20 +143,21 @@ def _transient(result: amazon_price.PriceResult) -> bool:
 
 
 def _capture_page_meta(page, asin: str | None, existing_cover: str | None = None) -> tuple:
-    """Best-effort capture of the book cover + description for a loaded page.
+    """Best-effort capture of the book cover, description, star rating and
+    rating count for a loaded page.
 
-    Extracts the cover URL + description from the rendered HTML (pure
+    Extracts them from the rendered HTML (pure
     selector parse, see ``amazon_price.extract_page_meta_html``), downloads
     the cover into ``DEALS_COVERS_DIR`` as ``<asin>.<ext>``, and returns
-    ``(cover_filename, description)`` — each ``None`` when unavailable
-    (block page, missing markup, or a failed download). Never raises: a
-    capture miss must never take the run down (the price result is what the
-    run depends on).
+    ``(cover_filename, description, stars, ratings)`` — each ``None`` when
+    unavailable (block page, missing markup, or a failed download). Never
+    raises: a capture miss must never take the run down (the price result is
+    what the run depends on).
 
     No-clobber rule: when the deal already has a cover (``existing_cover``)
     whose file is present on disk, it is NOT re-downloaded or overwritten —
     the existing file is kept (saves bandwidth and preserves the existing
-    art); only the description still refreshes from the page.
+    art); only the description/stars still refresh from the page.
     """
     try:
         meta = amazon_price.extract_page_meta_html(page.content())
@@ -170,10 +171,12 @@ def _capture_page_meta(page, asin: str | None, existing_cover: str | None = None
                 )
                 cover = path.name if path is not None else None
         description = (meta.get("description") or "").strip() or None
-        return cover, description
+        stars = (meta.get("stars") or "").strip() or None
+        ratings = (meta.get("ratings") or "").strip() or None
+        return cover, description, stars, ratings
     except Exception as exc:
-        log.warning("  cover/description capture failed (best-effort): %s", exc)
-        return None, None
+        log.warning("  cover/description/rating capture failed (best-effort): %s", exc)
+        return None, None, None, None
 
 
 def _read_with_retries(
@@ -181,18 +184,18 @@ def _read_with_retries(
 ):
     """Call ``read`` for one book, retrying transient failures with backoff.
 
-    ``read`` returns ``(result, cover, description)``; only the ``result``
-    drives the retry policy — the cover/description captured by the final
-    attempt are returned alongside it.
+    ``read`` returns ``(result, cover, description, stars, ratings)``; only the
+    ``result`` drives the retry policy — the metadata captured by the final
+    attempt is returned alongside it.
     """
     attempts = 0
     while True:
-        result, cover, description = read(
+        result, cover, description, stars, ratings = read(
             deal["amazon_url"], fingerprint=f, asin=deal["asin"],
             existing_cover=deal.get("cover"),
         )
         if not _transient(result) or attempts >= VERIFY_MAX_RETRIES:
-            return result, cover, description
+            return result, cover, description, stars, ratings
         attempts += 1
         summary["retries"] = summary.get("retries", 0) + 1
         log.warning(
@@ -345,16 +348,17 @@ def _run(args) -> int:
                 try:
                     page = ctx.new_page()
                     result = amazon_price.read_page(page, url, asin=asin)
-                    # Best-effort capture of the cover + description (the
-                    # BookBub Deals tab shows the cover by the title and the
-                    # description on hover); never raises — a miss leaves
-                    # (None, None) and the price result is untouched. If the
-                    # deal already has a cover file, it is kept (not
-                    # re-downloaded/overwritten) — see _capture_page_meta.
-                    cover, description = _capture_page_meta(
+                    # Best-effort capture of the cover + description + star
+                    # rating (the BookBub Deals tab shows the cover, a
+                    # description tooltip and the rating); never raises — a
+                    # miss leaves (None, None, None, None) and the price
+                    # result is untouched. If the deal already has a cover
+                    # file, it is kept (not re-downloaded/overwritten) — see
+                    # _capture_page_meta.
+                    cover, description, stars, ratings = _capture_page_meta(
                         page, asin, existing_cover=existing_cover
                     )
-                    return result, cover, description
+                    return result, cover, description, stars, ratings
                 finally:
                     ctx.close()
 
@@ -381,18 +385,20 @@ def _run(args) -> int:
                     f = fp.fresh_fingerprint(last_fp)
                 last_fp = f
 
-                result, cover, description = _read_with_retries(read, deal, f, summary)
+                result, cover, description, stars, ratings = _read_with_retries(read, deal, f, summary)
                 status, _cents = deals_db.classify_deal(deal["deal_price"], result.price_text)
                 current_price = result.price_text if status != "unknown" else None
                 deals_db.mark_verified(
                     conn, deal["id"], status=status, current_price=current_price, at=_now()
                 )
-                # Persist the captured cover/description (req 1/2). Only when
+                # Persist the captured cover/description/rating. Only when
                 # something was actually captured: a blocked or unreadable
-                # read returns (None, None) and must leave the row's prior
-                # values intact (never clobber good data).
+                # read returns None and must leave the row's prior values
+                # intact (never clobber good data).
                 if cover or description:
                     deals_db.update_cover_desc(conn, deal["id"], cover, description)
+                if stars is not None or ratings is not None:
+                    deals_db.update_rating(conn, deal["id"], stars, ratings)
                 conn.commit()
                 summary[status] += 1
                 processed += 1
