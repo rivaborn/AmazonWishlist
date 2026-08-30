@@ -23,6 +23,7 @@ from __future__ import annotations
 import datetime as _dt
 import re
 import sqlite3
+import unicodedata
 from pathlib import Path
 
 from .config import (
@@ -142,16 +143,22 @@ def _owned_title_key(text: str | None) -> str:
 
 
 def normalise(text: str | None) -> str:
-    """Lowercase, collapse whitespace, and strip common punctuation.
+    """Lowercase, strip diacritics, collapse whitespace, strip punctuation.
 
     Applied identically to the deal side and the grimmory side so the two
     formats of the same title/author converge (e.g. ``"Don't"`` -> ``"don t"``,
-    ``"e-book"`` -> ``"e book"``). Approximate on purpose: the resulting match
-    is stored in the DB so a human can audit its accuracy.
+    ``"e-book"`` -> ``"e book"``, ``"Inés"`` -> ``"ines"``). Diacritics are
+    removed via NFKD + dropping combining marks, so an accented "Inés" matches
+    an unaccented "Ines". Approximate on purpose: the resulting match is stored
+    in the DB so a human can audit its accuracy.
     """
     if not text:
         return ""
-    t = text.lower()
+    t = unicodedata.normalize("NFKD", text)
+    # Drop combining marks (the diacritics left over after NFKD decomposition),
+    # keeping the base letters — so accented vs plain forms converge.
+    t = "".join(ch for ch in t if not unicodedata.combining(ch))
+    t = t.lower()
     t = _PUNCT_RE.sub(" ", t)
     t = _WS_RE.sub(" ", t)
     return t.strip()
