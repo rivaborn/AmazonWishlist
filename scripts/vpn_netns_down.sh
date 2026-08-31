@@ -29,8 +29,23 @@ else
   [ "${EUID:-$(id -u)}" -eq 0 ] || { log "ERROR: must run as root (normally via amazon-wishlist-vpn.service ExecStop)"; exit 1; }
 fi
 
-run ip netns del "$NS" 2>/dev/null || true
-run ip link  del "$IFACE" 2>/dev/null || true
+# Bring the interface down FIRST — deleting an *up* WireGuard interface can
+# block. Then kill any leftover process still INSIDE the namespace: a lingering
+# Chromium pins the netns and makes `ip netns del` block (this was the recurring
+# ~90s teardown hang that marked every daily run failed despite the data work
+# having completed). Finally delete with a hard `timeout` so teardown can never
+# hang the stop job.
+run ip link set "$IFACE" down 2>/dev/null || true
+if [ -d "/var/run/netns/$NS" ]; then
+  pids="$(ip netns pids "$NS" 2>/dev/null || true)"
+  if [ -n "$pids" ]; then
+    [ "$DRY_RUN" = 1 ] && echo "  [dry-run] kill leftover netns pids: $pids"
+    for p in $pids; do run kill "$p" 2>/dev/null || true; done
+    sleep 1
+  fi
+fi
+run timeout 20 ip netns del "$NS" 2>/dev/null || true
+run timeout 20 ip link del "$IFACE" 2>/dev/null || true
 run rm -f "/etc/netns/$NS/resolv.conf"
 
 if [ "$DRY_RUN" = 1 ]; then

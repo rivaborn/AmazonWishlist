@@ -67,3 +67,6 @@ ExecStopPost=/usr/bin/sudo -n /usr/bin/systemctl stop amazon-wishlist-vpn.servic
 ProtectSystem=false
 PrivateTmp=false
 ReadWritePaths=/opt/amazon-wishlist/data /opt/amazon-wishlist/.cache
+# Generous stop timeout: the ExecStopPost VPN teardown sometimes takes a while,
+# and a teardown that outlives TimeoutStopSec would mark a completed run 'failed'.
+TimeoutStopSec=180
