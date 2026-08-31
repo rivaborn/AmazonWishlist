@@ -102,8 +102,12 @@ table.covers-4x .cover-col { width: 266px; }
      off-screen for the left-anchored cover, and the 260px cap made long
      descriptions into very tall boxes. Wide + viewport-capped = always fits. */
   left: 0;
-  width: 66vw;            /* at least 2/3 of the page width */
-  max-width: 66vw;
+  /* Content-sized (short descriptions stay small) but capped at a
+     comfortable ~68-character reading width that scales with the tooltip's
+     font size (small/normal/large, since `ch` = the average width of a '0'
+     at that size), and 90vw so it never overflows the screen. */
+  width: max-content;
+  max-width: min(68ch, 90vw);
   white-space: normal;
   overflow-wrap: anywhere;   /* break long unbroken text so it never clips */
   background: #1c1c1c;
