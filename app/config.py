@@ -313,8 +313,10 @@ AMAZON_NAV_TIMEOUT_MS = int(os.environ.get("AMAZON_NAV_TIMEOUT_MS", "45000"))
 
 # ---------- NordVPN CLI wrapper (app/nordvpn.py) ----------
 # Path to the `nordvpn` CLI (override with NORDVPN_CLI if it is not on PATH).
-# Credentials are read ONLY from the NORDVPN_USERNAME / NORDVPN_PASSWORD env
-# (or --nord-user / --nord-pass) — never from a committed file or a default here.
+# The login token is read ONLY from the NORDVPN_TOKEN env (or --nord-token) —
+# never from a committed file or a default here. Current NordVPN clients have
+# no username/password login, so a Nord Account access token is the only
+# automatable credential.
 # NORDVPN_COUNTRIES is the pool of exit countries `rotate()` cycles through so
 # each rotation lands on a different server/exit IP; NORDVPN_CITIES (optional)
 # adds a per-rotation city for finer variation.

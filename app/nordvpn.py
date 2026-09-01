@@ -8,10 +8,11 @@ flags/output is adapted here, not in the orchestrator.
 
 Credential safety (repo rule — never commit a secret or a rotating token):
 
-* The account credentials are read from the ``NORDVPN_USERNAME`` /
-  ``NORDVPN_PASSWORD`` environment variables, or passed as ``--nord-user`` /
-  ``--nord-pass``. They are **never** written to a committed file and have no
-  default here.
+* The login token is read from the ``NORDVPN_TOKEN`` environment variable,
+  or passed as ``--nord-token``. It is **never** written to a committed file
+  and has no default here. A token is the only automatable option left:
+  current NordVPN clients (5.x) removed username/password login entirely and
+  offer only browser SSO, ``--callback``, and ``--token``.
 * ``NORDVPN_COUNTRIES`` (and optional ``NORDVPN_CITIES``) is the rotation pool
   so ``rotate()`` lands on a different server/exit IP each call.
 
@@ -70,8 +71,7 @@ __all__ = [
 log = logging.getLogger("nordvpn")
 
 # Environment variable names for the credentials (values never live here).
-ENV_USERNAME = "NORDVPN_USERNAME"
-ENV_PASSWORD = "NORDVPN_PASSWORD"
+ENV_TOKEN = "NORDVPN_TOKEN"
 
 # A best-effort IPv4 in CLI output (the exact ``status`` layout varies, so we
 # grab the first public-looking dotted quad).
@@ -128,20 +128,26 @@ def _run(args: list[str], *, timeout: float = 90) -> str:
     return out
 
 
-def login(username: str | None = None, password: str | None = None) -> str:
-    """Log in via ``nordvpn login --username … --password …``.
+def login(token: str | None = None) -> str:
+    """Log in via ``nordvpn login --token …``.
 
-    Credentials come from the arguments or the ``NORDVPN_USERNAME`` /
-    ``NORDVPN_PASSWORD`` environment — never from a committed file.
+    The token comes from the argument or the ``NORDVPN_TOKEN`` environment —
+    never from a committed file. Generate it in the Nord Account dashboard
+    (Services -> NordVPN -> Access token); it is revoked by ``nordvpn logout``.
+
+    This used to shell ``login --username … --password …``, which every
+    current client rejects: NordVPN 5.x offers only browser SSO, ``--callback``
+    and ``--token`` (verified against 5.3.0, 2026-09-01). Password login is
+    gone, so there is no fallback to keep.
     """
-    user = (username or os.environ.get(ENV_USERNAME, "")).strip()
-    pw = password or os.environ.get(ENV_PASSWORD, "")
-    if not user or not pw:
+    tok = (token or os.environ.get(ENV_TOKEN, "")).strip()
+    if not tok:
         raise NordvpnError(
-            f"missing NordVPN credentials: set {ENV_USERNAME}/{ENV_PASSWORD} "
-            "or pass username/password"
+            f"missing NordVPN token: set {ENV_TOKEN} or pass a token. Current "
+            "clients have no username/password login — generate an access "
+            "token in the Nord Account dashboard."
         )
-    return _run(["login", "--username", user, "--password", pw])
+    return _run(["login", "--token", tok])
 
 
 def connect(country: str, city: str | None = None) -> str:
@@ -393,13 +399,12 @@ def _main() -> int:
     ap.add_argument("--login", action="store_true", help="Log in before reporting status")
     ap.add_argument("--rotate", action="store_true", help="Rotate to a new exit IP, then report")
     ap.add_argument("--connect", nargs=2, metavar=("COUNTRY", "CITY"), help="Connect to COUNTRY [CITY]")
-    ap.add_argument("--nord-user", default=None, help=f"Username (default: {ENV_USERNAME} env)")
-    ap.add_argument("--nord-pass", default=None, help=f"Password (default: {ENV_PASSWORD} env)")
+    ap.add_argument("--nord-token", default=None, help=f"Access token (default: {ENV_TOKEN} env)")
     args = ap.parse_args()
 
     try:
-        if args.login or args.nord_user or args.nord_pass:
-            login(args.nord_user, args.nord_pass)
+        if args.login or args.nord_token:
+            login(args.nord_token)
             print("logged in")
         if args.connect:
             country, city = args.connect

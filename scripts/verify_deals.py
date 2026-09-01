@@ -53,7 +53,7 @@ rebuild (fresh IP when permitted; the fingerprint still rotates either way).
 Usage (from repo root, VPN + credentials available):
     python scripts/verify_deals.py --check
     python scripts/verify_deals.py --limit 25 --rotate-every 10
-    NORDVPN_USERNAME=… NORDVPN_PASSWORD=… python scripts/verify_deals.py
+    NORDVPN_TOKEN=… python scripts/verify_deals.py
     # Ubuntu tunnel mode (the process runs inside the namespace):
     python scripts/verify_deals.py --netns wlvpn --limit 25 --rotate-every 10
 """
@@ -326,8 +326,8 @@ def _run(args) -> int:
                 print(f"nordvpn error: {exc}")
                 return 1
             if not st.connected:
-                if args.nord_user or args.nord_pass or os.environ.get(nordvpn.ENV_USERNAME):
-                    nordvpn.login(args.nord_user, args.nord_pass)
+                if args.nord_token or os.environ.get(nordvpn.ENV_TOKEN):
+                    nordvpn.login(args.nord_token)
                 nordvpn.connect(NORDVPN_START_COUNTRY)
             log.info("tunnel up via %s (ip %s)", st.country or NORDVPN_START_COUNTRY, nordvpn.ip())
             last_rotated_ip = nordvpn.ip()
@@ -492,10 +492,10 @@ def main() -> int:
                          "(e.g. 'wlvpn', via amazon-wishlist-verify.service or "
                          "scripts/vpn_verify.sh). Empty (default) = host-CLI mode, "
                          "where the nordvpn CLI is connected/rotated directly.")
-    ap.add_argument("--nord-user", default=None,
-                    help=f"Username (default: {nordvpn.ENV_USERNAME} env).")
-    ap.add_argument("--nord-pass", default=None,
-                    help=f"Password (default: {nordvpn.ENV_PASSWORD} env).")
+    ap.add_argument("--nord-token", default=None,
+                    help=f"Nord Account access token (default: {nordvpn.ENV_TOKEN} "
+                         "env). Host-CLI mode only; current clients have no "
+                         "username/password login.")
     ap.add_argument("--check", action="store_true",
                     help="Dry run: print the pending count + config, connect nothing, exit 0.")
     ap.add_argument("--fresh", action="store_true",
