@@ -131,9 +131,16 @@ run ip netns add "$NS"
 run ip link add "$IFACE" type wireguard
 run ip link set "$IFACE" netns "$NS"      # move the iface INTO the netns
 if [ "$DRY_RUN" = 1 ]; then
-  echo "  [dry-run] KEYF=\$(mktemp); chmod 600 KEYF; printf '%s\n' \"\$PRIV\" > KEYF   # session private key, mode 0600"
+  echo "  [dry-run] KEYF=\$(mktemp -p /etc/wireguard); chmod 600 KEYF; printf '%s\n' \"\$PRIV\" > KEYF   # session private key, mode 0600"
 else
-  KEYF=$(mktemp); chmod 600 "$KEYF"; printf '%s\n' "$PRIV" > "$KEYF"
+  # The key file MUST live under /etc/wireguard. Ubuntu 24.04+ ships a Canonical
+  # AppArmor profile for /usr/bin/wg whose only file rule is
+  # `file rw @{etc_rw}/wireguard/{,**}`, so a key anywhere else -- mktemp's /tmp
+  # default -- is denied with a bare `fopen: Permission denied` that never
+  # mentions AppArmor (seen on Ubuntu 26.04, 2026-09-01).
+  install -d -m 700 /etc/wireguard
+  KEYF=$(mktemp -p /etc/wireguard "$IFACE-key.XXXXXX"); chmod 600 "$KEYF"
+  printf '%s\n' "$PRIV" > "$KEYF"
 fi
 # allowed-ips 0.0.0.0/0 + the single default route below make the namespace
 # leak-proof: there is no other route, so a process cannot fall back to the
