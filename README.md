@@ -230,6 +230,21 @@ Future `install_systemd.sh` runs copy the service file from the repo, so they wi
 
 ---
 
+### wlvpn tunnel fails to start (`fopen: Permission denied`)
+
+`amazon-wishlist-vpn.service` exits 1 with nothing in its log but `wg`'s bare `fopen: Permission denied`. Ubuntu 24.04+ ships a Canonical AppArmor profile for `/usr/bin/wg` (`/etc/apparmor.d/wg`) whose only file rule is `file rw @{etc_rw}/wireguard/{,**}` — a session key file anywhere else is denied, and **nothing in the error mentions AppArmor**. Confirm with:
+
+```bash
+dmesg | grep -i 'apparmor.*DENIED'      # profile="wg" name="/tmp/tmp.XXXX" comm="wg"
+```
+
+`vpn_netns_up.sh` keeps its key in `/etc/wireguard` for exactly this reason; if you see this, the box is running an older copy of the script.
+
+Two traps that make this harder to diagnose than it should be:
+
+- After a few failed starts the unit hits `StartLimitBurst=5` and every later attempt returns **"Start request repeated too quickly"** — which masks whether your fix worked. Always `sudo systemctl reset-failed amazon-wishlist-vpn.service` before retrying.
+- Current NordVPN clients (5.x) have **no username/password login** — only browser SSO, `--callback`, and `--token`. If `nordvpn account` fails for `WISHLIST_VPN_USER`, the preflight aborts with "nordvpn not logged in"; the fix is an access token from the Nord Account dashboard, not the account password.
+
 ## Scrape progress / status API
 
 Two JSON endpoints back the wishlists page UI and can be polled by anything else:
@@ -375,6 +390,50 @@ sudo systemctl start amazon-wishlist
 ```
 
 The deals mirror needs **no** recovery action: it holds no cursor and no local state — every pull wholesale-replaces the local `deal` rows and rewrites the covers, so the next sync re-converges it automatically.
+
+### Failover: promoting a secondary
+
+When the primary is down long enough that you are unwilling to lose more daily scrapes, the secondary can take over. Every role check funnels through `config.ROLE`, which is read **once at import**, so the entire switch is the env file plus a restart:
+
+```bash
+sudo cp -a /etc/default/amazon-wishlist /etc/default/amazon-wishlist.bak-$(date +%Y%m%d)
+sudoedit /etc/default/amazon-wishlist     # WISHLIST_ROLE=primary, and comment out WISHLIST_PRIMARY_URL
+sudo systemctl restart amazon-wishlist
+journalctl -u amazon-wishlist -n 30 | grep '^Role:'    # expect: Role: PRIMARY. Daily scrape at HH:MM ...
+```
+
+**First check whether you need to promote at all.** Only the *scheduling* is role-gated. `amazon-wishlist-bookbub.service` is a standalone oneshot that writes `data/deals.db` and never touches `price_snapshot`, so it runs on a secondary unchanged — a missed BookBub day can be caught up without any role change, and `--date` targets the day that was missed rather than today:
+
+```bash
+sudo -u wishlist bash -c 'set -a; . /etc/default/amazon-wishlist; set +a;   export HOME=/opt/amazon-wishlist PLAYWRIGHT_BROWSERS_PATH=/opt/amazon-wishlist/.cache/playwright          PLAYWRIGHT_HOST_PLATFORM_OVERRIDE=ubuntu24.04-x64 XDG_RUNTIME_DIR=/tmp/runtime-wishlist;   cd /opt/amazon-wishlist && xvfb-run -a .venv/bin/python scripts/bookbub_daily.py --date 20260831 --netns wlvpn --limit 1'
+```
+
+Exporting the unit's own `Environment=` lines matters: sourcing only `/etc/default/amazon-wishlist` leaves `PLAYWRIGHT_BROWSERS_PATH` unset, Playwright then looks in `~/.cache/ms-playwright`, and the fetch fails with "Executable doesn't exist". `--limit` bounds the verify pass so catching up two days does not pay for two full re-verifications. On a secondary the fetched rows survive only until the next sync, which wholesale-replaces the `deal` table.
+
+**The revert rule — the thing to get right.** `price_snapshot` is written by exactly one function, `ingest_wishlist`, i.e. only by a wishlist scrape. Promotion itself, the BookBub job and `owned_update` write no snapshots. So:
+
+- **Before the promoted box's first scrape** its `wishlist.db` is still a pristine mirror, `MAX(price_snapshot.id)` still equals the watermark it synced, and reverting to `secondary` is just the env file and a restart — **no wipe, no resync**.
+- **After that first scrape** it allocates ids from `watermark+1` — the same ids the original primary will hand to *different* rows. The two databases have diverged permanently and whichever box becomes the secondary must be wiped (`rm data/wishlist.db* data/sync_state.json`) and fully resynced. `sync._warn_id_collision` only detects this after the fact, once rows have already been silently dropped.
+
+Check it any time with `sqlite3 /opt/amazon-wishlist/data/wishlist.db "SELECT MAX(id) FROM price_snapshot"` against the `watermark` in `GET /api/sync/status`. The deadline is the next `daily_scrape` fire, so decide before then or move the scrape time in the Settings tab to buy time.
+
+**What promotion turns on**, all at once: `daily_scrape` at the configured hour, `bookbub_daily` at 18:00, the monthly `owned_update`, the Login and Settings tabs, and the "Run scrape now" button. A `CronTrigger` never fires at startup, so a restart alone triggers nothing — but a job whose time has *not yet passed today* fires today.
+
+**What does not mirror, and must be provisioned by hand on the new primary:**
+
+- `data/storage_state.json` — the Amazon session is never synced and a secondary cannot create one (the login routes are 403). Without it the new primary scrapes **anonymously**, which only works for wishlists that are Public. Copy the file across or redo the Login-tab flow.
+- The `settings` table — `export_catalog` skips it, so the scrape and BookBub times fall back to the `WISHLIST_SCRAPE_HOUR` / 18:00 **env defaults**, not whatever the old primary had stored. Re-set them in the Settings tab.
+- Every secret in `/etc/default/amazon-wishlist` — `BOOKBUB_USERNAME`/`PASSWORD`, `GRIMMORY_USERNAME`/`PASSWORD`, and the one-time `nordvpn login --token`. A mirror never needed any of them, so a box that has only ever been a secondary has none.
+
+**Handing the role back.** Point the old primary at the new one (`WISHLIST_ROLE=secondary`, `WISHLIST_PRIMARY_URL=http://<new-primary>:9060`), then, because the ids diverged, wipe and resync it:
+
+```bash
+sudo systemctl stop amazon-wishlist
+sudo -u wishlist rm /opt/amazon-wishlist/data/wishlist.db* /opt/amazon-wishlist/data/sync_state.json
+sudo systemctl start amazon-wishlist
+```
+
+Also confirm the new secondary can reach the new primary on port 9060 — the sync direction reverses, and that port is unauthenticated and must stay firewalled to the peer.
 
 ## Grimmory book catalog (data/grimmory.db)
 
@@ -547,6 +606,7 @@ On the Ubuntu box the verifier does **not** use the host-wide `nordvpn connect`:
 - **Allowlist warning**: during that brief host connect the script allowlists the host's LAN (`WISHLIST_VPN_LAN_SUBNET`), the Tailscale range `100.64.0.0/10`, and port 22 so SSH/mgmt are never dropped — **set `WISHLIST_VPN_LAN_SUBNET` to match the host's LAN** or the SSH session drops for those seconds.
 - **Running the verifier inside the tunnel**: `amazon-wishlist-verify.service` (`sudo systemctl start amazon-wishlist-verify`, follow with `journalctl -u amazon-wishlist-verify -f`) runs `verify_deals.py --netns wlvpn --recheck` inside the namespace; it doubles as the daily re-verify step of the BookBub updater, and its `ExecStopPost` tears the tunnel down when it finishes. The ad-hoc `scripts/vpn_verify.sh` (needs the scoped sudoers rule documented in its header) is the manual companion. Both place the process in the namespace (`NetworkNamespacePath` / `ip netns exec`) with the namespace's Nord DNS bound over `/etc/resolv.conf`. In this mode no `NORDVPN_TOKEN` is needed anywhere — the tunnel unit reuses the session the operator established once with `nordvpn login --token`.
 - **Steady state**: the tunnel's egress IP is **fixed for the tunnel's life** and changes only on a rebuild, so the per-N `--rotate-every` hop is a *best-effort* `systemctl restart` of the tunnel unit (fresh exit IP when permitted; a rebuild that is not permitted leaves the stable IP and the run continues with fingerprint-only rotation). A NordLynx peer-key rotation can silently stale the tunnel the same way — `systemctl restart amazon-wishlist-vpn` re-establishes it, and the verifier's `unknown`/failure rate is the canary.
+- **Known issue — the verify pass can abort a few minutes in.** On at least one box the run stops early with `tunnel error: namespace 'wlvpn' lost live egress after N verified book(s)` (seen at N=15 and N=17, both roughly 3½ minutes after the namespace was built). Verified rows are kept and a re-run resumes, so it makes progress a few books at a time, but a full pass never completes unattended. Ruled out so far: the tunnel itself (an idle namespace held a stable exit IP and healthy handshakes for a 10-minute test) and rate-limiting of the `api.ipify.org` probe (20/20 consecutive probes succeeded through the tunnel). The abort tracks *elapsed time under Chromium load*, not book count, which points at `_tunnel_live`'s probe failing while the browser saturates the namespace — check the probe timeout (`WISHLIST_VPN_ENDPOINT`, `tunnel_egress_ip`) and per-namespace DNS before assuming the tunnel died.
 - **Fail-closed guarantee**: the verifier only ever fetches an Amazon page while the tunnel is *verifiably live*. Two layers: (1) structurally, the namespace's **only** route is the tunnel (`allowed-ips 0.0.0.0/0` + a single default route), so a dead/stale tunnel cannot leak Amazon traffic onto the host's plain IP; (2) operationally, `--netns` mode checks egress before the browser even launches, then **re-verifies it immediately before every single book** — if the tunnel loses live egress the run **aborts** (verified rows are kept; re-run resumes from `deal_status`) rather than continue. A dead tunnel therefore never results in Amazon access from the host IP.
 
 ### Configuration (env vars)
