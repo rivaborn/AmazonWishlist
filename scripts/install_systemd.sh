@@ -82,24 +82,38 @@ chown -R "$APP_USER:$APP_USER" "$APP_DIR"
 modprobe wireguard 2>/dev/null || \
   echo "note: 'modprobe wireguard' failed — if the module is missing, the wlvpn tunnel cannot come up" >&2
 
-# The nordvpn CLI ships as a .deb from Nord, not a distro package, and its
-# versioned filename changes over time, so this is best-effort: a stale URL
-# must never abort a deploy (the service restart below is what ships the code).
+# The nordvpn CLI ships from Nord's own apt repo, not from Ubuntu. Install the
+# `nordvpn-release` package (it drops in the repo + signing key) and then apt
+# the client, rather than pinning a versioned .deb: the previously pinned URL
+# (nordvpn_6.4-1_all.deb) started 404ing once Nord reorganised the pool, and
+# apt also gets the box future client updates for free. Best-effort throughout
+# — a failure here must never abort a deploy (the service restart below is what
+# ships the code), it only leaves the tunnel unavailable.
 # After (re)install, the operator must log in ONCE as WISHLIST_VPN_USER:
 #   nordvpn login --token <TOKEN>
-# (the token comes from the NordVPN account; the credentials are never stored
-# in this repo — the tunnel only reads the session back out of the nordlynx
-# interface). Set NORDVPN_DEB_URL to override the pinned .deb.
-NORDVPN_DEB_URL="${NORDVPN_DEB_URL:-https://repo.nordvpn.com/deb/nordvpn/stable/lucid/pool/main/n/nordvpn/nordvpn_6.4-1_all.deb}"
+# The token comes from the Nord Account dashboard. Current NordVPN clients have
+# NO username/password login — only browser SSO, --callback, or --token — so a
+# token is the only automatable option. Credentials are never stored in this
+# repo; the tunnel only reads the session back out of the nordlynx interface.
+# Set NORDVPN_RELEASE_DEB_URL to override the repo package.
+NORDVPN_RELEASE_DEB_URL="${NORDVPN_RELEASE_DEB_URL:-https://repo.nordvpn.com/deb/nordvpn/debian/pool/main/n/nordvpn-release/nordvpn-release_1.0.0_all.deb}"
 if command -v nordvpn >/dev/null 2>&1; then
   echo "nordvpn CLI already present: $(command -v nordvpn)"
-elif ! (curl -fsSL "$NORDVPN_DEB_URL" -o /tmp/nordvpn.deb && dpkg -i /tmp/nordvpn.deb); then
-  echo "WARNING: could not install the nordvpn CLI from $NORDVPN_DEB_URL" >&2
-  echo "         (stale versioned URL or network block). Install it manually from" >&2
-  echo "         https://repo.nordvpn.com/deb/nordvpn/, run 'nordvpn login --token <TOKEN>'" >&2
+elif ! (curl -fsSL "$NORDVPN_RELEASE_DEB_URL" -o /tmp/nordvpn-release.deb         && dpkg -i /tmp/nordvpn-release.deb         && apt-get update -qq         && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nordvpn); then
+  echo "WARNING: could not install the nordvpn CLI via $NORDVPN_RELEASE_DEB_URL" >&2
+  echo "         (network block, or Nord moved the repo package). Install it by hand" >&2
+  echo "         from https://nordvpn.com/download/linux/, run 'nordvpn login --token <TOKEN>'" >&2
   echo "         as WISHLIST_VPN_USER, then 'systemctl restart amazon-wishlist-vpn.service'." >&2
 fi
-rm -f /tmp/nordvpn.deb
+rm -f /tmp/nordvpn-release.deb
+
+# The client's postinst adds the *installing* box's login user to the nordvpn
+# group, which is not necessarily WISHLIST_VPN_USER — and vpn_netns_up.sh drives
+# the CLI as that user (`runuser -u "$NVUSER" -- nordvpn ...`), so ensure it is
+# a member. Tolerated: no group means no tunnel, but the deploy still succeeds.
+if [ -n "${WISHLIST_VPN_USER:-}" ] && getent group nordvpn >/dev/null 2>&1; then
+  usermod -aG nordvpn "$WISHLIST_VPN_USER" 2>/dev/null     || echo "note: could not add '$WISHLIST_VPN_USER' to the nordvpn group" >&2
+fi
 
 install -m 644 "$APP_DIR/amazon-wishlist.service" /etc/systemd/system/amazon-wishlist.service
 # The wlvpn tunnel unit: installed but NOT a boot-time unit (no [Install]
