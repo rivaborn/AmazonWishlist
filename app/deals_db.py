@@ -435,15 +435,18 @@ def parse_price_cents(text: str | None) -> int | None:
 
 
 def pending_deals(conn: sqlite3.Connection, limit: int | None = None) -> list[dict]:
-    """Unverified deals that have an Amazon ASIN, in row order.
+    """Unverified, non-hidden deals that have an Amazon ASIN, in row order.
 
     Returns ``{id, asin, amazon_url, deal_price, title}`` for rows where
     ``deal_status IS NULL`` and whose ``amazon_url`` contains an ASIN.
     ``limit`` caps the number of dicts returned (after the ASIN filter).
+    Hidden rows are skipped for the same reason as in :func:`recheck_deals`:
+    ``current_deals`` never shows them, so verifying them buys nothing.
     """
     rows = conn.execute(
         "SELECT id, amazon_url, deal_price, title, cover FROM deal "
-        "WHERE deal_status IS NULL AND amazon_url IS NOT NULL ORDER BY id"
+        "WHERE deal_status IS NULL AND amazon_url IS NOT NULL AND hidden = 0 "
+        "ORDER BY id"
     ).fetchall()
     out: list[dict] = []
     for row_id, url, deal_price, title, cover in rows:
@@ -480,20 +483,33 @@ def mark_verified(
 
 
 def recheck_deals(conn: sqlite3.Connection, limit: int | None = None) -> list[dict]:
-    """Deals the daily updater must (re-)verify: everything EXCEPT expired.
+    """Deals the daily updater must (re-)verify: everything except expired and hidden.
 
     Like :func:`pending_deals` but selects rows whose ``deal_status`` is NULL
     (never checked) or ``current`` / ``unknown`` (still believed live, or
-    unreadable last time — worth another look). An ``expired`` deal is
-    terminal and is NEVER re-checked (requirement: "Expired deals are never
-    checked again"). Same ``{id, asin, amazon_url, deal_price, title}`` shape
-    as ``pending_deals``, ASIN-filtered the same way, ``limit`` applied after
-    the ASIN filter.
+    unreadable last time — worth another look). Same
+    ``{id, asin, amazon_url, deal_price, title}`` shape as ``pending_deals``,
+    ASIN-filtered the same way, ``limit`` applied after the ASIN filter.
+
+    Two terminal exclusions, both meaning "this row can never be shown again,
+    so re-reading Amazon for it buys nothing":
+
+    * An ``expired`` deal is terminal and is NEVER re-checked (requirement:
+      "Expired deals are never checked again").
+    * A ``hidden`` deal was dismissed by the user; ``current_deals`` leaves it
+      off the tab, so its price is never displayed. These dominated the scope
+      in practice — 271 of 390 recheckable rows on 2026-09-01 — so skipping
+      them cuts roughly two thirds of the Amazon reads out of every nightly
+      pass, which is both faster and a smaller anti-bot footprint.
+
+    The trade-off, deliberately accepted: un-hiding a deal later surfaces
+    whatever status it had when it was hidden, since nothing refreshed it in
+    the meantime.
     """
     rows = conn.execute(
         "SELECT id, amazon_url, deal_price, title, cover FROM deal "
         "WHERE (deal_status IS NULL OR deal_status IN (?, ?)) "
-        "AND amazon_url IS NOT NULL ORDER BY id",
+        "AND amazon_url IS NOT NULL AND hidden = 0 ORDER BY id",
         (DEAL_STATUS_CURRENT, DEAL_STATUS_UNKNOWN),
     ).fetchall()
     out: list[dict] = []
