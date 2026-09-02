@@ -326,7 +326,17 @@ def tunnel_egress_ip(timeout: float | None = None) -> str | None:
         ["curl", "-s", "--max-time", str(int(t)), WISHLIST_VPN_ENDPOINT], timeout=t + 5.0
     )
     if rc != 0:
-        log.debug("tunnel_egress_ip: curl failed (rc=%s): %s", rc, out.strip()[:200])
+        # WARNING, not debug: this is the single fact that distinguishes a dead
+        # tunnel from a probe that merely could not run. curl rc 6 = DNS did not
+        # resolve, 7 = connect refused, 28 = curl's own timeout, and _run_cmd's
+        # synthetic 124 = the subprocess itself timed out (i.e. the box was too
+        # busy to answer, not the tunnel). The verifier aborts a whole run on
+        # this signal, so losing the reason at DEBUG made every abort
+        # indistinguishable and cost days of misdiagnosis.
+        log.warning(
+            "tunnel_egress_ip: probe of %s failed (curl rc=%s): %s",
+            WISHLIST_VPN_ENDPOINT, rc, out.strip()[:200] or "(no output)",
+        )
         return None
     m = _IP_RE.search(out)
     return m.group(0) if m else None
