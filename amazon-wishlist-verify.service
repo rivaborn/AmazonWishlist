@@ -8,8 +8,15 @@
 # namespace at start and binds the namespace's Nord DNS over /etc/resolv.conf
 # (systemd does not apply the /etc/netns convention itself). BindsTo= the
 # tunnel unit so the verifier stops too if the tunnel stops; Requires= brings
-# the tunnel up, and ExecStopPost tears it down when the run is done, so the
-# VPN is only connected while the verifier is in use.
+# the tunnel up. This unit deliberately does NOT tear the tunnel down itself:
+# it is BindsTo/Requires the tunnel, so a systemctl stop of the tunnel from
+# this unit's own ExecStopPost would propagate a stop back onto the
+# already-stopping verifier and circular-wait against TimeoutStopSec (the
+# recurring ~180s teardown deadlock that marked every daily run failed).
+# Teardown is owned by the daily amazon-wishlist-bookbub.service ExecStopPost
+# (not itself bound to the tunnel, so its stop cannot deadlock); a standalone
+# run must be followed by an explicit, not-bound `sudo systemctl stop
+# amazon-wishlist-vpn.service`.
 #
 # This unit doubles as the daily re-verify step of the BookBub updater: the
 # daily fetch runs OUTSIDE the netns (headful Chromium cannot launch inside a
@@ -54,19 +61,16 @@ Environment="PLAYWRIGHT_HOST_PLATFORM_OVERRIDE=ubuntu24.04-x64"
 # leading `-` means an install that keeps the defaults needs no such file.
 EnvironmentFile=-/etc/default/amazon-wishlist
 ExecStart=/opt/amazon-wishlist/.venv/bin/python scripts/verify_deals.py --netns wlvpn --recheck
-# Teardown after EVERY run: the tunnel is in use only while the verifier runs.
-# ExecStopPost runs as the service user, hence the scoped sudoers rule.
-ExecStopPost=/usr/bin/sudo -n /usr/bin/systemctl stop amazon-wishlist-vpn.service
+# No ExecStopPost teardown here on purpose: this unit is BindsTo/Requires the
+# tunnel, so stopping the tunnel from its own stop-post circular-waits against
+# TimeoutStopSec (see header). The daily bookbub unit's ExecStopPost owns
+# teardown; a standalone run must stop the tunnel explicitly afterwards.
 # No Restart= (one run per trigger — the app's once-a-day schedule is the
 # retry; a failure must die, not flap the tunnel on a restart loop). No
 # [Install] section: never enabled at boot.
 # Hardening (mirrors amazon-wishlist.service: chromium's multi-process model —
 # zygote / crashpad / shared /tmp sockets — breaks under stricter settings;
-# see the NOTE in that unit). NoNewPrivileges is deliberately NOT set:
-# ExecStopPost relies on the scoped `wishlist` sudoers rule.
+# see the NOTE in that unit). NoNewPrivileges is deliberately NOT set.
 ProtectSystem=false
 PrivateTmp=false
 ReadWritePaths=/opt/amazon-wishlist/data /opt/amazon-wishlist/.cache
-# Generous stop timeout: the ExecStopPost VPN teardown sometimes takes a while,
-# and a teardown that outlives TimeoutStopSec would mark a completed run 'failed'.
-TimeoutStopSec=180
