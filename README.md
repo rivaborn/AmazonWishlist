@@ -435,11 +435,32 @@ sudo systemctl start amazon-wishlist
 
 Also confirm the new secondary can reach the new primary on port 9060 — the sync direction reverses, and that port is unauthenticated and must stay firewalled to the peer.
 
+### Reverse failover: giving the role back when the promoted box holds the only fresh DB
+
+"Handing the role back" above assumes the original primary is still current. The hard case is when the promoted box ran as primary **long enough to be ahead**: it now holds the only complete DB, and the original primary (which was down) is stale. Wiping the promoted box and pointing it at the stale box would **lose** everything the promoted box scraped. Do the push-into-primary-then-demote sequence instead, treating the promoted box's DB as authoritative:
+
+1. **Back up both sites' `data/`** (wishlist.db, deals.db, covers, grimmory.db, storage_state, sync_state) into a timestamped dir before touching anything.
+2. **Prove no-data-loss before copying.** The promoted box must be a strict *superset* of the stale box, not just a different lineage. Compare the returned `GET /api/sync/status` `watermark`/`max_snapshot_id` — and for real certainty hash the rows the two DBs share. A mirror that synced from the stale box through watermark `W` and then scraped forward holds identical rows through `W` then appends. Sample/hash the shared range (e.g. sha256 over all `price_snapshot` columns for `id <= W`) on both — identical hash = the copy direction is loss-free. (Two DBs sharing early ids can still differ mid-range; see the 2026-08-25 lesson below. Never trust counts alone.)
+3. **Push the promoted box's DB into the stale primary.** Stop the new primary's app, `install` the promoted box's `wishlist.db` + `deals.db` + `covers` in (verify `sha256sum` matches the source and `PRAGMA integrity_check` is `ok` first), keep the old files as `data/rollback-<ts>/`, fix `wishlist:wishlist` ownership, start, and confirm `MAX(id)` matches the promoted box before proceeding. This makes the restored primary the full, authoritative single source.
+4. **Update the old primary's code** (`git pull` + re-run `install_systemd.sh`) so it carries the current fixes on return.
+5. **Demote the promoted box to secondary** — `WISHLIST_ROLE=secondary` + `WISHLIST_PRIMARY_URL=http://<restored-primary>:9060`, then, because its DB diverged while primary, wipe it (`rm data/wishlist.db* data/sync_state.json data/scrape_progress.json`) and restart so it does a **full resync from the restored primary**. Verify `/api/sync/status` watermark reaches the primary's `max_snapshot_id` with no error, and confirm content parity (same counts / aggregate) rather than same file hash — a freshly resynced mirror has different physical row order, so `sha256sum` of the file differs legitimately.
+6. **Re-process ownership on the primary** (see Grimmory below) — a box that ran `bookbub_daily` without a local `grimmory.db` sets `owned_in_grimmory` to NULL on every deal row, so owned books reappear on the BookBub tab until a real Grimmory refresh runs. Rebuild `grimmory.db`, then run the targeted `refresh_owned` so the resynced mirror inherits the flags.
+
+**Worked example (2026-09-02):** `.43` was promoted to primary on 2026-09-01 while `.1.6` was down; by return, .43 had scraped 255,079 → 260,697 snapshots (a proven superset — shared 255,079 rows hash-identical). Sequence: backup both → hash-verify superset → copy .43's wishlist.db/deals.db/covers into 1.6 (rollback kept) → `git pull` + deploy 1.6 → demote .43 to secondary + wipe + resync (landed at 260,697, no error) → rebuild grimmory.db (37,771 books) + `refresh_owned` (106 of 565 deals marked owned). Final content parity across both hosts: identical max id, snapshot count, wishlist/membership/book counts, and SUM of prices.
+
 ## Grimmory book catalog (data/grimmory.db)
 
 A one-off export of the home-lab **Grimmory** (BookLore) ebook libraries into this repo's `data/` directory. It is a separate SQLite file from `wishlist.db` with its own schema — a static catalog snapshot (title, author, publisher, date published, ISBN). The web app reads it (see "Update Owned Books" below) but never writes it directly; it is rebuilt from Grimmory by `scripts/build_grimmory_db.py`, run manually OR automatically: on the 1st of each month, and on demand via the **"Update Owned Books"** button on the Settings tab.
 
 `scripts/build_grimmory_db.py` logs into the Grimmory instance (JWT login via `POST /api/v1/auth/login`, see `app/grimmory.py`), resolves the target libraries by name, fetches every book per library (`GET /api/v1/libraries/{id}/book`), and rebuilds the `book` table in a single transaction (staging table renamed over the old one, so a failed run rolls back and the previous data is left intact):
+
+**Marking ownership on an existing DB** (e.g. after restoring a primary or when `owned_in_grimmory` went NULL): rebuild `grimmory.db` as above, then re-derive the flag on every deal row with the targeted `deals_db.refresh_owned` (the same call the daily fetch's step-1 makes) — it recomputes `owned_in_grimmory` for all rows against the local `grimmory.db` and the caller commits:
+
+```bash
+sudo -u wishlist ./.venv/bin/python -c "import sqlite3,sys;sys.path.insert(0,'/opt/amazon-wishlist');from app.deals_db import refresh_owned;from app.config import GRIMMORY_DB,DEALS_DB;c=sqlite3.connect(DEALS_DB);print('wrote',refresh_owned(c,GRIMMORY_DB),'rows');c.commit()"
+```
+
+Prefer this targeted call over the full "Update Owned Books" owned_update when you only need to fix `owned_in_grimmory` on `deals.db` — `owned_update` also refreshes grimmory and moves owned → Purchased, which has side effects you may not want mid-reconciliation. Note the env-file gotcha if you re-derive this from a shell: `/etc/default/amazon-wishlist` is a plain `KEY=VALUE` file and a `&` in any value breaks `source` — parse it in Python (read lines, split on first `=`), don't shell-eval it.
 
 ```bash
 GRIMMORY_USERNAME=... GRIMMORY_PASSWORD=... python scripts/build_grimmory_db.py
