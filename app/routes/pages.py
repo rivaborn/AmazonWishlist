@@ -123,7 +123,9 @@ def bookbub_deals_page(
     before pagination keeps every page consistently ordered and the
     extra_query carries the active sort into every page link.
     `?show_hidden=1` also reveals rows the user has hidden (hidden rows are
-    excluded by default). Each row shows the captured book cover (served from
+    excluded by default). A hide is stored per BOOK (deals_db.hidden_book), so
+    it also covers the new row a later BookBub re-feature of the same book
+    creates -- the per-row flag it replaced was erased by the nightly dedup. Each row shows the captured book cover (served from
     the local covers dir at /covers/<name>) by the title and the captured
     Amazon description as a hover tooltip on BOTH the cover and the title.
     Page size comes from the per-page dropdown (BOOKBUB_PER_PAGE_OPTIONS,

@@ -254,6 +254,222 @@ def _check_sync(wid):
         config.ROLE = prev_role
 
 
+def _check_hidden_books() -> None:
+    """A hide is a property of the BOOK, not of the deal row it was clicked on.
+
+    BookBub re-features the same book on later dates; every date is its own
+    `deal` row (uq_deal_date_bub) and the nightly `deduplicate()` deletes the
+    older ones. A per-row `hidden` flag was therefore erased every time a book
+    came round again and the dismissed deal reappeared on the tab -- which is
+    what `deals_db.hidden_book` (keyed by book identity) exists to stop.
+    """
+    from types import SimpleNamespace
+
+    from app import deals_db, sync as sync_mod
+
+    def _deal(bub, title, author, amazon):
+        return SimpleNamespace(url=bub, title=title, author=author,
+                               price="$1.99", original_price="$9.99",
+                               amazon_url=amazon)
+
+    db_path = _tmp / "deals.db"
+    absent_grimmory = _tmp / "no-such-grimmory.db"  # -> owned flags NULL
+    asin_url = "https://www.amazon.com/dp/B0DEAL0001?tag=t"
+    kept_url = "https://www.amazon.com/dp/B0DEAL0002?tag=t"
+
+    def _verify_all(conn):
+        """Mark every unchecked row live, so it reaches the tab."""
+        for (row_id,) in conn.execute(
+            "SELECT id FROM deal WHERE deal_status IS NULL"
+        ).fetchall():
+            deals_db.mark_verified(conn, row_id, status=config.DEAL_STATUS_CURRENT,
+                                   current_price="$1.99", at="2026-09-01T00:00:00")
+        conn.commit()
+
+    # ---- day 1: two live deals, one of them dismissed ----
+    deals_db.store_deals(
+        [_deal("https://www.bookbub.com/d/1", "Hidden Book", "A Writer", asin_url),
+         _deal("https://www.bookbub.com/d/2", "Kept Book", "B Writer", kept_url)],
+        "20260901", deals_path=db_path, grimmory_path=absent_grimmory)
+
+    conn = deals_db.connect(db_path)
+    try:
+        deals_db.ensure_schema(conn)
+        _verify_all(conn)
+        rows = deals_db.current_deals(conn)
+        assert len(rows) == 2, rows
+        hidden_id = [r for r in rows if r["title"] == "Hidden Book"][0]["id"]
+        assert deals_db.set_hidden(conn, hidden_id, True)
+        conn.commit()
+        assert [r["title"] for r in deals_db.current_deals(conn)] == ["Kept Book"]
+        shown = {r["title"]: r["hidden"] for r in
+                 deals_db.current_deals(conn, show_hidden=True)}
+        assert shown == {"Hidden Book": 1, "Kept Book": 0}, shown
+        # The nightly pass must not spend an Amazon read on a dismissed book.
+        assert [r["title"] for r in deals_db.recheck_deals(conn)] == ["Kept Book"]
+        print("deals: hide removes the book from the tab and from the recheck set")
+    finally:
+        conn.close()
+
+    # ---- day 2: the same book is featured again, and dedup deletes the row
+    #      that was hidden. The hide must survive both.
+    deals_db.store_deals(
+        [_deal("https://www.bookbub.com/d/9", "Hidden Book", "A Writer", asin_url)],
+        "20260902", deals_path=db_path, grimmory_path=absent_grimmory)
+    conn = deals_db.connect(db_path)
+    try:
+        deals_db.ensure_schema(conn)
+        assert deals_db.deduplicate(conn) == 1  # the day-1 row is gone
+        conn.commit()
+        new_id = conn.execute(
+            "SELECT id FROM deal WHERE title = 'Hidden Book'"
+        ).fetchone()[0]
+        assert new_id != hidden_id
+        _verify_all(conn)
+        titles = [r["title"] for r in deals_db.current_deals(conn)]
+        assert titles == ["Kept Book"], titles
+        assert [r["title"] for r in deals_db.recheck_deals(conn)] == ["Kept Book"]
+        print("deals: the hide survives a re-feature on a new date + the dedup")
+
+        # A later date whose amazon_url has no ASIN yet (an unresolved BookBub
+        # intermediate link) is the same book by title+author, so it stays hidden.
+        deals_db.store_deals(
+            [_deal("https://www.bookbub.com/d/12", "Hidden Book", "A Writer",
+                   "https://www.bookbub.com/redirect/12")],
+            "20260903", deals_path=db_path, grimmory_path=absent_grimmory)
+        _verify_all(conn)
+        titles = [r["title"] for r in deals_db.current_deals(conn)]
+        assert titles == ["Kept Book"], titles
+        print("deals: the hide holds for a row whose amazon_url lost its ASIN")
+
+        # Un-hiding from any one of its rows brings the book back everywhere.
+        assert deals_db.set_hidden(conn, new_id, False)
+        conn.commit()
+        back = sorted(r["title"] for r in deals_db.current_deals(conn))
+        assert back == ["Hidden Book", "Hidden Book", "Kept Book"], back
+        assert deals_db.set_hidden(conn, new_id, True)
+        conn.commit()
+        print("deals: un-hide clears every row of the book, re-hide restores it")
+    finally:
+        conn.close()
+
+    # ---- the legacy per-row flags migrate once, and only once ----
+    legacy = _tmp / "deals-legacy.db"
+    conn = deals_db.connect(legacy)
+    try:
+        deals_db.ensure_schema(conn)
+        conn.execute(
+            "INSERT INTO deal (date, title, author, bookbub_url, amazon_url, "
+            "no_amazon_link, hidden, deal_status) VALUES "
+            "('20260101', 'Old Hide', 'C Writer', 'https://b/1', ?, 0, 1, 'current')",
+            (asin_url,),
+        )
+        conn.execute("DROP TABLE hidden_book")  # back to the pre-migration shape
+        conn.commit()
+        deals_db.ensure_schema(conn)
+        assert deals_db.current_deals(conn) == [], "legacy hidden flag was not carried over"
+        row_id = conn.execute("SELECT id FROM deal").fetchone()[0]
+        assert deals_db.set_hidden(conn, row_id, False)
+        conn.commit()
+        deals_db.ensure_schema(conn)  # a later call must not re-hide it
+        assert len(deals_db.current_deals(conn)) == 1
+        print("deals: legacy deal.hidden flags migrate once, and un-hide sticks")
+    finally:
+        conn.close()
+
+    # ---- the mirror gets the hides, not just the rows ----
+    mirror_db = _tmp / "deals-mirror.db"
+    prev_db, prev_covers = config.DEALS_DB, config.DEALS_COVERS_DIR
+    config.DEALS_COVERS_DIR = _tmp / "covers"
+    try:
+        config.DEALS_DB = db_path
+        payload = sync_mod.export_deals()
+        assert payload["hidden_books"], "export dropped the hides"
+        config.DEALS_DB = mirror_db
+        applied = sync_mod.apply_deals(payload, config.DEALS_COVERS_DIR)
+        assert applied["hidden_books"] == len(payload["hidden_books"]), applied
+        conn = deals_db.connect(mirror_db)
+        try:
+            deals_db.ensure_schema(conn)
+            titles = [r["title"] for r in deals_db.current_deals(conn)]
+            assert titles == ["Kept Book"], titles
+        finally:
+            conn.close()
+        # A payload from a peer that predates the table must not wipe ours.
+        payload.pop("hidden_books")
+        applied = sync_mod.apply_deals(payload, config.DEALS_COVERS_DIR)
+        assert applied["hidden_books"] > 0, applied
+        conn = deals_db.connect(mirror_db)
+        try:
+            assert [r["title"] for r in deals_db.current_deals(conn)] == ["Kept Book"]
+        finally:
+            conn.close()
+        print("deals: hides mirror to the secondary; an older payload leaves them alone")
+    finally:
+        config.DEALS_DB, config.DEALS_COVERS_DIR = prev_db, prev_covers
+
+
+def _check_owned_matching() -> None:
+    """Ownership matching survives an author written surname-first.
+
+    Grimmory inherits a large minority of its authors from Calibre as
+    "Matheson, Richard"; BookBub always writes "Richard Matheson". The match
+    requires the authors to be equal, so every one of those owned books used to
+    fail the audit and stay on the deals tab (14 of 688 deal rows on
+    2026-09-06). The equal-author rule itself has to survive intact -- it is
+    what stops two different books sharing a title from being called owned.
+    """
+    import sqlite3
+    from types import SimpleNamespace
+
+    from app import deals_db
+
+    grim = _tmp / "grimmory-smoke.db"
+    conn = sqlite3.connect(grim)
+    try:
+        conn.execute("CREATE TABLE book (title TEXT, author TEXT)")
+        conn.executemany("INSERT INTO book (title, author) VALUES (?, ?)", [
+            # surname-first in the library, written out on the deal side
+            # Calibre stores this one as "Matheson| Richard"; Grimmory, which is
+            # what the app actually reads, normalises the separator to a comma.
+            ("What Dreams May Come: A Novel", "Matheson, Richard"),
+            ("Big Bad Wool (A Sheep Detective Story)", "Swann, Leonie"),
+            # written out in the library, surname-first on the deal side
+            ("The Wide Wide Sea", "Hampton Sides"),
+            # a title collision that must NOT be called owned
+            ("Across the Universe", "Beth Revis"),
+        ])
+        conn.commit()
+    finally:
+        conn.close()
+
+    def deal(title, author):
+        return SimpleNamespace(url=f"https://b/{title}", title=title, author=author,
+                               amazon_url=None)
+
+    cases = [
+        (deal("What Dreams May Come", "Richard Matheson"), 1, "library surname-first"),
+        (deal("Big Bad Wool", "Leonie Swann"), 1, "library surname-first + subtitle"),
+        (deal("The Wide Wide Sea", "Sides, Hampton"), 1, "deal surname-first"),
+        (deal("Across the Universe", "Danielle Steel"), 0, "same title, other author"),
+        (deal("Shaman", "Kim Stanley Robinson"), 0, "not in the library at all"),
+        # A comma on the deal side can also separate co-authors; flipping that
+        # must produce a key that matches nothing rather than a false positive.
+        (deal("Across the Universe", "Jennifer Reingold, Daniel Reingold"), 0,
+         "co-author comma is not an inversion"),
+    ]
+    got = deals_db.owned_lookup([c[0] for c in cases], grim)
+    for d, want, why in cases:
+        assert got[d.url] == want, (why, d.title, d.author, got[d.url])
+    print(f"owned: {len(cases)} author/title cases match, incl. surname-first on both sides")
+
+    # No catalog file at all -> ownership unknown (NULL), never "not owned":
+    # such deals still show, which is the safe direction.
+    missing = deals_db.owned_lookup([cases[0][0]], _tmp / "no-such-grimmory.db")
+    assert missing[cases[0][0].url] is None, missing
+    print("owned: a missing catalog audits as unknown, not as not-owned")
+
+
 def main() -> int:
     init_db()
     wid = add_wishlist("https://www.amazon.com/hz/wishlist/ls/FAKETEST", "smoke")
@@ -506,6 +722,8 @@ def main() -> int:
     assert never_row["last_scraped_at"] is None and never_row["stale"] is True, never_row
 
     _check_sync(wid)
+    _check_hidden_books()
+    _check_owned_matching()
 
     # Hit every page through the HTTP layer
     paths = [

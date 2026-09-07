@@ -67,17 +67,21 @@ def set_purchased(asin: str, body: dict = Body(...)):
 
 @router.post("/deals/{row_id}/hidden", dependencies=[Depends(_require_primary)])
 def set_deal_hidden(row_id: int, body: dict = Body(...)):
-    """Hide/show one BookBub deal row (the BookBub Deals tab's row checkbox).
+    """Hide/show the book behind one BookBub deal row (the tab's checkbox).
 
-    The flag lives in deals.db — a per-instance UI preference that the mirror
-    never syncs — so, like the purchased toggle, it is primary-only.
+    ``row_id`` addresses a `deal` row, but the hide is stored per BOOK
+    (deals_db.hidden_book, keyed by ASIN/title+author), so it also covers the
+    rows a later re-feature of the same book creates — a per-row flag was
+    erased by the nightly dedup and the deal came back. Writes deals.db, so
+    like the purchased toggle it is primary-only; the mirror receives hides
+    with its daily deals sync.
     """
     if "hidden" not in body:
         raise HTTPException(400, "missing 'hidden' field")
     hidden = bool(body["hidden"])
     conn = deals_db.connect(config.DEALS_DB)
     try:
-        deals_db.ensure_schema(conn)  # idempotent (adds the hidden column if missing)
+        deals_db.ensure_schema(conn)  # idempotent (creates hidden_book if missing)
         ok = deals_db.set_hidden(conn, row_id, hidden)
         conn.commit()
     finally:

@@ -16,14 +16,21 @@ One run does the whole daily cycle:
    ``(date, bookbub_url)`` and computes ``owned_in_grimmory`` against
    ``GRIMMORY_DB`` and sets ``no_amazon_link``. (requirements 3 + 4)
 
-   It then **refreshes ``owned_in_grimmory`` for every row** against the
-   local ``GRIMMORY_DB`` file (``deals_db.refresh_owned``) — the upsert only
-   audits the date it just stored, so books added to the library since the
-   last store would otherwise still show on the tab. A missing grimmory.db
+   It then **rebuilds ``GRIMMORY_DB`` from the Grimmory server**
+   (``build_grimmory_db.build`` over the ``GRIMMORY_LIBRARIES`` libraries) and
+   **refreshes ``owned_in_grimmory`` for every row** against the rebuilt file
+   (``deals_db.refresh_owned``) — the upsert only audits the date it just
+   stored, so books added to the library since the last store would otherwise
+   still show on the tab. Until this step existed the catalog was rebuilt only
+   by the MONTHLY "Update Owned Books" job (or by hand), so a book bought on
+   the 2nd went on being offered as a deal for the rest of the month. Both
+   steps are best-effort: no Grimmory credentials, an unreachable server or a
+   DB error is logged and the run continues on the catalog already on disk
+   (the builder stages into a scratch table, so a failed rebuild cannot leave
+   a half-written one). A missing grimmory.db
    sets the flags NULL (such deals still show) and never aborts the run.
-   (The grimmory.db file itself is refreshed out-of-band on the host — the
-   updater runs inside the wlvpn netns where the Grimmory server is not
-   reachable.)
+   The rebuild runs on the HOST, outside the tunnel namespace, where Grimmory
+   is reachable — only the step-2 re-verify runs inside ``wlvpn``.
 
    Finally it **removes duplicates created by the new books**:
    ``deals_db.deduplicate`` collapses every book that was featured on several
@@ -76,6 +83,7 @@ import logging
 import subprocess
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
 # `python scripts/bookbub_daily.py` puts scripts/ on sys.path[0] (so the sibling
@@ -89,6 +97,9 @@ from app.config import (  # noqa: E402
     BOOKBUB_USERNAME,
     DEALS_DB,
     GRIMMORY_DB,
+    GRIMMORY_LIBRARIES,
+    GRIMMORY_PASSWORD,
+    GRIMMORY_USERNAME,
     NORDVPN_ROTATE_EVERY,
 )
 
@@ -138,6 +149,59 @@ def _run_netns_recheck(args) -> int:
         time.sleep(10)
     log.error("timed out waiting for %s", VERIFY_UNIT)
     return 1
+
+
+def _refresh_grimmory_catalog() -> None:
+    """(1a) Rebuild ``GRIMMORY_DB`` from the Grimmory server (best-effort).
+
+    ``refresh_owned`` below is only ever as right as the file it reads, and
+    the only other thing that rebuilds it is the app's MONTHLY "Update Owned
+    Books" job (``owned_update``, 1st of the month at 03:00, or the Settings
+    button). A month is far too coarse for this: a book bought on the 2nd went
+    on showing as a deal for the rest of the month. This step belongs here
+    because the catalog has to be current at the moment the ownership audit
+    reads it, which is the next thing this run does.
+
+    It deliberately does NOT do the rest of what ``owned_update`` does -- that
+    job also moves owned wishlist books to Purchased, and changing how often
+    that happens is a separate decision. Both call the same
+    ``build_grimmory_db.build``, whose staging-table rename is a single
+    transaction, so even if the two ever landed together (they are 15 hours
+    apart) one would simply win.
+
+    Best-effort by design — this is an accuracy improvement, not a
+    prerequisite. Absent credentials, an unreachable Grimmory, or a DB error
+    are logged and the run continues against whatever catalog is already on
+    disk, whole (see the transaction above).
+
+    Runs on the host, outside the ``wlvpn`` namespace (only the step-2
+    re-verify is delegated into the netns), which is why the Grimmory server
+    is reachable from here at all.
+    """
+    if not (GRIMMORY_USERNAME and GRIMMORY_PASSWORD):
+        log.warning(
+            "no Grimmory credentials (GRIMMORY_USERNAME / GRIMMORY_PASSWORD; on "
+            "the host: /etc/default/amazon-wishlist): skipping the catalog "
+            "rebuild. Ownership stays only as fresh as %s.", GRIMMORY_DB,
+        )
+        return
+    try:
+        import build_grimmory_db  # sibling script; scripts/ is on sys.path[0]
+
+        from app import grimmory
+
+        token = grimmory.login()
+        per_library = build_grimmory_db.build(token, Path(GRIMMORY_DB))
+        log.info(
+            "rebuilt the Grimmory catalog %s: %d book(s) [%s]",
+            GRIMMORY_DB, sum(per_library.values()),
+            ", ".join(f"{name}: {n}" for name, n in per_library.items()),
+        )
+    except Exception as e:  # noqa: BLE001 - never fatal; see the docstring
+        log.warning(
+            "Grimmory catalog rebuild failed (continuing with the existing %s, "
+            "so ownership may be stale): %s", GRIMMORY_DB, e,
+        )
 
 
 def _claim_daily_slot(db_path: str, date: str) -> bool:
@@ -191,6 +255,10 @@ def main() -> int:
                          "verify_deals.py (default NORDVPN_ROTATE_EVERY).")
     ap.add_argument("--limit", type=int, default=None,
                     help="Forwarded to verify_deals.py: verify at most N deals.")
+    ap.add_argument("--no-catalog-refresh", action="store_true",
+                    help="Skip step 1a (rebuilding data/grimmory.db from the "
+                         "Grimmory server) and audit ownership against the "
+                         "catalog file as it stands.")
     ap.add_argument("--check", action="store_true",
                     help="Dry run: print the date, credential status, and the "
                          "recheckable deal count from the DB. No network/browser/tunnel.")
@@ -215,8 +283,21 @@ def main() -> int:
                 conn.close()
         cred_state = ("credentials: set"
                       if creds else "no BOOKBUB_USERNAME / BOOKBUB_PASSWORD configured")
+        gpath = Path(GRIMMORY_DB)
+        if not gpath.exists():
+            catalog = f"catalog {gpath} MISSING (every deal audits as ownership-unknown)"
+        else:
+            age = datetime.fromtimestamp(gpath.stat().st_mtime)
+            catalog = f"catalog {gpath} built {age.isoformat(timespec='seconds')}"
+        if args.no_catalog_refresh:
+            catalog += ", rebuild disabled"
+        elif not (GRIMMORY_USERNAME and GRIMMORY_PASSWORD):
+            catalog += ", no Grimmory credentials so it will not be rebuilt"
+        else:
+            catalog += f", rebuilt each run from [{GRIMMORY_LIBRARIES}]"
         print(f"check: date {date} | {cred_state} | {n} recheckable (non-expired) "
-              f"deal(s) with an ASIN in {args.db} | netns {args.netns or '(host CLI)'}")
+              f"deal(s) with an ASIN in {args.db} | netns {args.netns or '(host CLI)'} "
+              f"| {catalog}")
         return 0
 
     # Real run: the account credentials are a hard prerequisite (checked before
@@ -259,6 +340,16 @@ def main() -> int:
     except Exception as e:  # a store failure is fatal — the re-verify would churn stale rows
         log.error("failed to store deals in %s: %s", args.db, e)
         return 1
+
+    # (1a) Rebuild the Grimmory catalog the ownership audit reads. Nothing
+    #      else refreshes it, so without this step (1b) below re-applies a
+    #      catalog that ages until someone rebuilds it by hand, and books
+    #      bought since keep showing on the tab. Best-effort (see the helper).
+    if args.no_catalog_refresh:
+        log.info("step 1a skipped (--no-catalog-refresh): auditing ownership "
+                 "against %s as it stands", GRIMMORY_DB)
+    else:
+        _refresh_grimmory_catalog()
 
     # (1b) Refresh owned_in_grimmory for ALL rows against the current
     #      grimmory.db. store_deals only audited the date it just stored, so

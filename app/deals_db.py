@@ -50,6 +50,11 @@ __all__ = [
     "classify_deal",
     "current_deals",
     "sort_deals",
+    "identity_keys",
+    "hidden_keys",
+    "is_hidden",
+    "hidden_book_rows",
+    "replace_hidden_books",
     "set_hidden",
     "recheck_deals",
     "update_cover_desc",
@@ -74,23 +79,54 @@ CREATE TABLE IF NOT EXISTS deal (
     deal_status        TEXT,                                   -- NULL=unchecked, else current|expired|unknown
     current_price      TEXT,                                   -- last read Amazon price text
     verified_at        TEXT,                                   -- ISO time of the last live check
-    hidden             INTEGER NOT NULL DEFAULT 0,             -- 1 when the user hid it from the BookBub Deals tab
+    hidden             INTEGER NOT NULL DEFAULT 0,             -- LEGACY, never read or written any more: hides live in hidden_book
     cover              TEXT,                                   -- book cover filename in data/covers/ (NULL when never captured)
     description        TEXT,                                   -- Amazon book description captured during verification (NULL when never captured)
     stars              REAL,                                   -- Amazon star rating (0-5, e.g. 4.5) captured during verification (NULL when never captured)
     ratings            INTEGER                                 -- Amazon rating count captured during verification (NULL when never captured)
 );
 CREATE UNIQUE INDEX IF NOT EXISTS uq_deal_date_bub ON deal(date, bookbub_url);
+
+-- A book the user dismissed from the BookBub Deals tab, keyed by BOOK
+-- IDENTITY rather than by deal row. BookBub re-features the same book on
+-- later dates; every date is its own `deal` row (uq_deal_date_bub) and
+-- `deduplicate()` then deletes the older ones -- so the per-row `deal.hidden`
+-- flag this table replaces was erased every time a book came round again, and
+-- the deal reappeared on the tab. One row per key from `identity_keys()` (the
+-- ASIN key AND the normalised title+author key), so a hide also survives an
+-- amazon_url that gains or loses its /dp/ ASIN between dates. `title`/`author`
+-- are stored for human audit only; nothing matches on them.
+CREATE TABLE IF NOT EXISTS hidden_book (
+    book_key   TEXT PRIMARY KEY,
+    title      TEXT,
+    author     TEXT,
+    hidden_at  TEXT NOT NULL
+);
 """
 
 
+def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
+    """True when ``name`` is an existing table in this database."""
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (name,)
+    ).fetchone()
+    return row is not None
+
+
 def ensure_schema(conn: sqlite3.Connection) -> None:
-    """Create the deals schema if missing (idempotent)."""
+    """Create the deals schema if missing (idempotent).
+
+    The ``hidden_book`` existence check must happen BEFORE the schema script
+    runs (which creates the table): it is what makes the legacy-flag backfill
+    in :func:`_migrate` a one-shot, so a book the user un-hides afterwards is
+    not silently re-hidden by the next call.
+    """
+    fresh_hidden_book = not _table_exists(conn, "hidden_book")
     conn.executescript(SCHEMA_SQL)
-    _migrate(conn)
+    _migrate(conn, backfill_hidden=fresh_hidden_book)
 
 
-def _migrate(conn: sqlite3.Connection) -> None:
+def _migrate(conn: sqlite3.Connection, backfill_hidden: bool = False) -> None:
     """In-place upgrades for older deals databases (mirrors app/db.py).
 
     Each step is a no-op if the column already exists, so this is safe to run
@@ -106,6 +142,30 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE deal ADD COLUMN ratings INTEGER")
     if "hidden" not in cols:
         conn.execute("ALTER TABLE deal ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0")
+    if backfill_hidden:
+        _backfill_hidden_books(conn)
+
+
+def _backfill_hidden_books(conn: sqlite3.Connection) -> int:
+    """One-shot: carry the legacy per-row ``deal.hidden`` flags into
+    ``hidden_book``. Returns the number of keys written.
+
+    Called only from the :func:`ensure_schema` pass that CREATES
+    ``hidden_book``, so it can never re-hide a book the user un-hid later.
+    Commits itself: most callers of ``ensure_schema`` are read paths that
+    close the connection without committing, which would roll the backfill
+    back while leaving the (already committed) empty table in place -- i.e.
+    every existing hide lost on the first page load after the upgrade.
+    """
+    rows = conn.execute(
+        "SELECT title, author, amazon_url FROM deal WHERE hidden = 1"
+    ).fetchall()
+    at = _dt.datetime.now().isoformat(timespec="seconds")
+    n = 0
+    for title, author, amazon_url in rows:
+        n += _hide_keys(conn, title, author, amazon_url, at)
+    conn.commit()
+    return n
 
 
 def connect(path: str | Path) -> sqlite3.Connection:
@@ -164,16 +224,51 @@ def normalise(text: str | None) -> str:
     return t.strip()
 
 
+def _author_keys(author: str | None) -> list[str]:
+    """Author keys for the ownership match: the name as written, plus the
+    ``"Surname, Given"`` -> ``"Given Surname"`` flip.
+
+    The two sides spell the same author differently. Grimmory carries a large
+    minority of its authors surname-first ("Matheson, Richard"), inherited from
+    the Calibre libraries behind it; BookBub always writes them out ("Richard
+    Matheson"). The match requires the author to be EQUAL -- that strictness is
+    what stops unrelated books with the same title being called owned -- so
+    every one of those entries silently failed to match, and the owned book
+    stayed on the deals tab. Measured against the live data on 2026-09-06:
+    1,615 of 37,771 catalog rows are stored surname-first, and 14 of 688 deal
+    rows were owned but missed for this reason alone.
+
+    Only a SINGLE comma is treated as an inversion, and both halves must be
+    non-empty. A BookBub credit can also use a comma to separate co-authors
+    ("Jennifer Reingold, Daniel Reingold"); flipping that yields a key that
+    simply matches nothing, which is why the flip is additive (an extra key)
+    and never replaces the name as written.
+    """
+    keys = [_owned_title_key(author)]
+    if author and author.count(",") == 1:
+        last, first = author.split(",", 1)
+        if last.strip() and first.strip():
+            flipped = _owned_title_key(f"{first} {last}")
+            if flipped and flipped != keys[0]:
+                keys.append(flipped)
+    return [k for k in keys if k]
+
+
 def _build_owned_index(grimmory_rows) -> dict:
     """Index grimmory rows for owned-lookup: ``author_key -> [title_key, ...]``.
 
     Titles/authors are run through :func:`_owned_title_key` (parenthetical
     stripped, diacritics removed, normalised). Grouping by author keeps each
-    deal's lookup small (only same-author Grimmory titles are compared).
+    deal's lookup small (only same-author Grimmory titles are compared). Each
+    title is filed under every key :func:`_author_keys` gives for its author,
+    so a surname-first catalog entry is reachable from the way BookBub writes
+    the same name.
     """
     idx: dict = {}
     for title, author in grimmory_rows:
-        idx.setdefault(_owned_title_key(author), []).append(_owned_title_key(title))
+        title_key = _owned_title_key(title)
+        for author_key in _author_keys(author):
+            idx.setdefault(author_key, []).append(title_key)
     return idx
 
 
@@ -181,17 +276,21 @@ def _is_owned(index: dict, title, author) -> bool:
     """True when (title, author) matches a grimmory entry in ``index``.
 
     Requires the normalised (paren/diacritic-stripped, :func:`_owned_title_key`)
-    author to be EQUAL, and the normalised title to be EQUAL *or* a word-aligned
-    prefix of the other — so a short BookBub title ("Witch World: High Hallack
-    Cycle") matches a Grimmory title that expands it with a colon/parenthetical
-    subtitle ("...: The Jargoon Pard, …"). The exact-author requirement keeps
-    unrelated title collisions (e.g. two different "Across the Universe" books)
-    from being hidden.
+    author to be EQUAL in one of the forms :func:`_author_keys` allows -- the
+    name as written or with a single "Surname, Given" comma flipped -- and the
+    normalised title to be EQUAL *or* a word-aligned prefix of the other, so a
+    short BookBub title ("Witch World: High Hallack Cycle") matches a Grimmory
+    title that expands it with a colon/parenthetical subtitle ("...: The Jargoon
+    Pard, …"). The equal-author requirement keeps unrelated title collisions
+    (e.g. two different "Across the Universe" books) from being hidden; the flip
+    is tried on BOTH sides because either source can be the one holding the
+    inverted spelling.
     """
     tk = _owned_title_key(title)
-    for gtk in index.get(_owned_title_key(author), ()):
-        if tk == gtk or tk.startswith(gtk + " ") or gtk.startswith(tk + " "):
-            return True
+    for author_key in _author_keys(author):
+        for gtk in index.get(author_key, ()):
+            if tk == gtk or tk.startswith(gtk + " ") or gtk.startswith(tk + " "):
+                return True
     return False
 
 
@@ -232,10 +331,12 @@ def refresh_owned(conn: sqlite3.Connection, grimmory_path: str | Path) -> int:
     (all of them); the caller commits.
 
     Used by the daily updater (``scripts/bookbub_daily.py``): ``store_deals``
-    only computes ownership for the date it just (re)stores, so re-applying
-    against the local ``grimmory.db`` file each run keeps the flag fresh
-    without calling the Grimmory API (the updater runs in the wlvpn netns,
-    where the Grimmory server is not reachable).
+    only computes ownership for the date it just (re)stores, so re-applying to
+    every row each run keeps the flag fresh. The updater rebuilds
+    ``grimmory.db`` from the Grimmory server immediately before calling this,
+    so the file it reads is the current library. (Only the updater's Amazon
+    re-verify pass runs inside the wlvpn netns, where Grimmory is unreachable;
+    the fetch, the rebuild and this refresh all run on the host.)
     """
     import types
 
@@ -397,6 +498,107 @@ def deduplicate(conn: sqlite3.Connection) -> int:
 
 
 # --------------------------------------------------------------------------- #
+# Hidden books (a per-BOOK dismissal, not a per-row flag)
+# --------------------------------------------------------------------------- #
+def identity_keys(title: str | None, author: str | None,
+                  amazon_url: str | None) -> list[str]:
+    """Every ``hidden_book.book_key`` under which this book can be hidden.
+
+    Always the normalised ``meta:<title>|<author>`` key; plus, when
+    ``amazon_url`` carries a ``/dp/`` ASIN, ``asin:<ASIN>`` first. Derived from
+    the same normalisation :func:`book_identity` uses, so "the same book" means
+    the same thing to a hide as it does to :func:`deduplicate` -- which matters,
+    because dedup deletes the very rows a hide has to outlive.
+
+    A hide is written under ALL of these keys and looked up against ALL of
+    them (unlike ``book_identity``, which returns the ASIN alone when there is
+    one). That is deliberate: a deal's ``amazon_url`` can be an unresolved
+    BookBub intermediate link on one date and the canonical product URL on the
+    next, so keying on the ASIN alone would lose the hide in exactly the case
+    this table exists to cover. ``normalise`` strips punctuation, so a "|" can
+    never appear inside a key part and the two halves cannot run together.
+    """
+    keys = [f"meta:{normalise(title)}|{normalise(author)}"]
+    asin = asin_from_amazon_url(amazon_url)
+    if asin:
+        keys.insert(0, f"asin:{asin}")
+    return keys
+
+
+def hidden_keys(conn: sqlite3.Connection) -> set[str]:
+    """Every hidden book key, as a set for :func:`is_hidden` lookups.
+
+    Read once per query rather than joined per row: the table is a few hundred
+    rows at most, and the ``meta`` half of a key needs Python's
+    :func:`normalise`, which SQLite cannot express.
+    """
+    return {r[0] for r in conn.execute("SELECT book_key FROM hidden_book")}
+
+
+def is_hidden(keys: set[str], title: str | None, author: str | None,
+              amazon_url: str | None) -> bool:
+    """True when this deal's book is in ``keys`` (from :func:`hidden_keys`)."""
+    return any(k in keys for k in identity_keys(title, author, amazon_url))
+
+
+def _hide_keys(conn: sqlite3.Connection, title: str | None, author: str | None,
+               amazon_url: str | None, at: str) -> int:
+    """Write every key for one book into ``hidden_book`` (the caller commits).
+
+    Re-hiding an already hidden book refreshes the stored title/author and
+    keeps the original ``hidden_at``. Returns the number of keys written.
+    """
+    keys = identity_keys(title, author, amazon_url)
+    for key in keys:
+        conn.execute(
+            "INSERT INTO hidden_book (book_key, title, author, hidden_at) "
+            "VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(book_key) DO UPDATE SET "
+            "title = excluded.title, author = excluded.author",
+            (key, title, author, at),
+        )
+    return len(keys)
+
+
+def hidden_book_rows(conn: sqlite3.Connection) -> list[dict]:
+    """Every ``hidden_book`` row as a dict, in key order (for the mirror)."""
+    return [
+        {"book_key": k, "title": t, "author": a, "hidden_at": h}
+        for k, t, a, h in conn.execute(
+            "SELECT book_key, title, author, hidden_at FROM hidden_book "
+            "ORDER BY book_key"
+        )
+    ]
+
+
+def replace_hidden_books(conn: sqlite3.Connection, rows) -> int:
+    """Replace the whole ``hidden_book`` table with ``rows`` (the caller
+    commits, and is expected to already be inside a transaction).
+
+    Whole-table, like the deals mirror around it: the table is tiny, carries
+    no ids anything else references, and a hide the primary cleared has to
+    disappear here too. Returns the number of rows written.
+    """
+    conn.execute("DELETE FROM hidden_book")
+    payload = [
+        (
+            r.get("book_key"),
+            r.get("title"),
+            r.get("author"),
+            r.get("hidden_at") or _dt.datetime.now().isoformat(timespec="seconds"),
+        )
+        for r in rows
+        if r.get("book_key")
+    ]
+    conn.executemany(
+        "INSERT OR REPLACE INTO hidden_book (book_key, title, author, hidden_at) "
+        "VALUES (?, ?, ?, ?)",
+        payload,
+    )
+    return len(payload)
+
+
+# --------------------------------------------------------------------------- #
 # Live-deal verification (price check against current Amazon)
 # --------------------------------------------------------------------------- #
 _CURRENCY_RE = re.compile(r"\$\s?(\d{1,3}(?:,\d{3})*(?:\.\d{1,2})?|\d+(?:\.\d{1,2})?)")
@@ -440,16 +642,19 @@ def pending_deals(conn: sqlite3.Connection, limit: int | None = None) -> list[di
     Returns ``{id, asin, amazon_url, deal_price, title}`` for rows where
     ``deal_status IS NULL`` and whose ``amazon_url`` contains an ASIN.
     ``limit`` caps the number of dicts returned (after the ASIN filter).
-    Hidden rows are skipped for the same reason as in :func:`recheck_deals`:
+    Hidden books are skipped for the same reason as in :func:`recheck_deals`:
     ``current_deals`` never shows them, so verifying them buys nothing.
     """
+    hidden = hidden_keys(conn)
     rows = conn.execute(
-        "SELECT id, amazon_url, deal_price, title, cover FROM deal "
-        "WHERE deal_status IS NULL AND amazon_url IS NOT NULL AND hidden = 0 "
+        "SELECT id, amazon_url, deal_price, title, cover, author FROM deal "
+        "WHERE deal_status IS NULL AND amazon_url IS NOT NULL "
         "ORDER BY id"
     ).fetchall()
     out: list[dict] = []
-    for row_id, url, deal_price, title, cover in rows:
+    for row_id, url, deal_price, title, cover, author in rows:
+        if is_hidden(hidden, title, author, url):
+            continue
         asin = asin_from_amazon_url(url)
         if asin:
             out.append(
@@ -496,8 +701,9 @@ def recheck_deals(conn: sqlite3.Connection, limit: int | None = None) -> list[di
 
     * An ``expired`` deal is terminal and is NEVER re-checked (requirement:
       "Expired deals are never checked again").
-    * A ``hidden`` deal was dismissed by the user; ``current_deals`` leaves it
-      off the tab, so its price is never displayed. These dominated the scope
+    * A ``hidden`` book was dismissed by the user (``hidden_book``, matched by
+      book identity); ``current_deals`` leaves it off the tab, so its price is
+      never displayed. These dominated the scope
       in practice — 271 of 390 recheckable rows on 2026-09-01 — so skipping
       them cuts roughly two thirds of the Amazon reads out of every nightly
       pass, which is both faster and a smaller anti-bot footprint.
@@ -506,14 +712,17 @@ def recheck_deals(conn: sqlite3.Connection, limit: int | None = None) -> list[di
     whatever status it had when it was hidden, since nothing refreshed it in
     the meantime.
     """
+    hidden = hidden_keys(conn)
     rows = conn.execute(
-        "SELECT id, amazon_url, deal_price, title, cover FROM deal "
+        "SELECT id, amazon_url, deal_price, title, cover, author FROM deal "
         "WHERE (deal_status IS NULL OR deal_status IN (?, ?)) "
-        "AND amazon_url IS NOT NULL AND hidden = 0 ORDER BY id",
+        "AND amazon_url IS NOT NULL ORDER BY id",
         (DEAL_STATUS_CURRENT, DEAL_STATUS_UNKNOWN),
     ).fetchall()
     out: list[dict] = []
-    for row_id, url, deal_price, title, cover in rows:
+    for row_id, url, deal_price, title, cover, author in rows:
+        if is_hidden(hidden, title, author, url):
+            continue
         asin = asin_from_amazon_url(url)
         if asin:
             out.append(
@@ -598,9 +807,11 @@ def current_deals(
     (``deal_status`` NULL), and books already owned. ``deal_price_cents`` is
     the numeric value of ``deal_price`` in cents (``None`` when unparseable,
     ``Free!`` → 0); it exists so price sorting is numeric, not textual.
-    Rows the user hid (``hidden`` = 1) are excluded unless ``show_hidden``
-    is true; the ``hidden`` flag is also returned in each dict so the UI can
-    render the per-row hide checkbox. ``cover`` is the captured cover image
+    Deals whose BOOK the user hid (a :func:`hidden_keys` match, not the legacy
+    ``deal.hidden`` column) are excluded unless ``show_hidden`` is true; the
+    resulting ``hidden`` 1/0 is returned in each dict so the UI can render the
+    hide checkbox. Matching by book means a hide still holds after BookBub
+    re-features the book on a later date under a new row id. ``cover`` is the captured cover image
     filename (``data/covers/``; None when never captured) and ``description``
     the captured Amazon description text (shown as a hover tooltip), both
     None when the page has never been verified. ``stars`` (float 0-5) and
@@ -609,19 +820,22 @@ def current_deals(
     ``stars >= min_stars`` (rows with no rating are excluded when
     ``min_stars`` > 0; ``min_stars`` 0 or negative shows all).
     """
+    hidden_set = hidden_keys(conn)
     rows = conn.execute(
         "SELECT id, date, title, author, deal_price, original_price, amazon_url, "
-        "hidden, cover, description, stars, ratings "
+        "cover, description, stars, ratings "
         "FROM deal WHERE deal_status = ? AND amazon_url IS NOT NULL "
         "AND owned_in_grimmory IS NOT 1 "
-        "AND (hidden = 0 OR ? = 1) "
         "AND (? <= 0 OR (stars IS NOT NULL AND stars >= ?)) "
         "ORDER BY date DESC, id DESC",
-        (DEAL_STATUS_CURRENT, int(show_hidden), min_stars, min_stars),
+        (DEAL_STATUS_CURRENT, min_stars, min_stars),
     ).fetchall()
     out: list[dict] = []
     for (row_id, date, title, author, deal_price, original_price, amazon_url,
-         hidden, cover, description, stars, ratings) in rows:
+         cover, description, stars, ratings) in rows:
+        hidden = 1 if is_hidden(hidden_set, title, author, amazon_url) else 0
+        if hidden and not show_hidden:
+            continue
         out.append(
             {
                 "id": row_id,
@@ -643,16 +857,35 @@ def current_deals(
 
 
 def set_hidden(conn: sqlite3.Connection, row_id: int, hidden: bool) -> bool:
-    """Set or clear a deal row's hidden flag (the caller commits).
+    """Hide or un-hide the BOOK behind deal ``row_id`` (the caller commits).
 
-    Returns True when the row existed and was updated, False when the id is
-    unknown (so the caller can answer 404).
+    Addressed by row id because that is what the tab's checkbox knows, but the
+    hide is stored against the row's book identity (:func:`identity_keys`), so
+    it covers every ``deal`` row for that book -- past, present, and the rows
+    tomorrow's BookBub fetch will create. Un-hiding drops every key for the
+    book, so it un-hides all of them too.
+
+    Returns True when the row existed, False when the id is unknown (so the
+    caller can answer 404).
     """
-    cur = conn.execute(
-        "UPDATE deal SET hidden = ? WHERE id = ?",
-        (1 if hidden else 0, row_id),
-    )
-    return cur.rowcount > 0
+    row = conn.execute(
+        "SELECT title, author, amazon_url FROM deal WHERE id = ?", (row_id,)
+    ).fetchone()
+    if row is None:
+        return False
+    title, author, amazon_url = row
+    if hidden:
+        _hide_keys(
+            conn, title, author, amazon_url,
+            _dt.datetime.now().isoformat(timespec="seconds"),
+        )
+    else:
+        keys = identity_keys(title, author, amazon_url)
+        placeholders = ", ".join("?" * len(keys))
+        conn.execute(
+            f"DELETE FROM hidden_book WHERE book_key IN ({placeholders})", keys
+        )
+    return True
 
 
 def sort_deals(rows: list[dict], sort: str = "date", direction: str = "desc") -> list[dict]:

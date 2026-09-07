@@ -82,9 +82,11 @@ BOOK_COLUMNS = (
 
 # The whole BookBub `deal` table mirrors to a secondary (GET /api/sync/deals).
 # All columns — the mirror duplicates the primary's deals page, including the
-# captured cover filename + description, the captured Amazon star rating + 
-# rating count, the owned audit, and the per-row hidden flag (the secondary's
-# own hide toggles are 403 anyway).
+# captured cover filename + description, the captured Amazon star rating +
+# rating count and the owned audit. `hidden` is the LEGACY per-row flag, dead
+# on both ends (nothing reads or writes it) and carried only so a peer running
+# older code still gets the column it inserts; the live hides travel beside the
+# rows as `hidden_books` (the secondary's own hide toggles are 403 anyway).
 DEAL_COLUMNS = (
     "id",
     "date",
@@ -106,7 +108,6 @@ DEAL_COLUMNS = (
     "stars",
     "ratings",
 )
-
 
 class SyncRefused(Exception):
     """A catalog was fetched successfully but was not applied.
@@ -431,8 +432,12 @@ def _check_deals_format(payload: dict) -> None:
 def export_deals() -> dict:
     """The primary's whole BookBub deals DB + cover images (base64).
 
-    Every ``deal`` row (all columns) in id order, plus ``covers``: a dict
-    ``{cover_filename: base64}`` for every file present in
+    Every ``deal`` row (all columns) in id order, every ``hidden_book`` row
+    -- a hide is keyed by BOOK IDENTITY, not by deal row, so it lives in its
+    own table and would otherwise never reach the mirror, which would then show
+    every book the primary had dismissed --
+    (``hidden_books`` -- the per-book hides the tab filters on), plus
+    ``covers``: a dict ``{cover_filename: base64}`` for every file present in
     ``DEALS_COVERS_DIR`` (unreadable files are skipped, not fatal). The
     secondary applies this via :func:`apply_deals` inside the same once-a-day
     pull as the catalog + snapshots, so the mirror's BookBub Deals page
@@ -453,6 +458,7 @@ def export_deals() -> dict:
                 f"SELECT {', '.join(DEAL_COLUMNS)} FROM deal ORDER BY id"
             ).fetchall()
         ]
+        hidden_books = deals_db.hidden_book_rows(conn)
     finally:
         conn.close()
 
@@ -471,6 +477,7 @@ def export_deals() -> dict:
         "format": SYNC_FORMAT,
         "source_now": _now(),
         "deals": deals,
+        "hidden_books": hidden_books,
         "covers": covers,
     }
 
@@ -480,11 +487,12 @@ def apply_deals(payload: dict, covers_dir: str | Path) -> dict:
 
     One transaction for the DB: ``DELETE FROM deal`` + re-insert every row
     with the primary's explicit ids (``sqlite_sequence`` is not reset by a
-    DELETE, and a mirror never inserts local rows, so ids cannot collide);
-    a failure rolls the whole thing back and the prior mirror is intact.
+    DELETE, and a mirror never inserts local rows, so ids cannot collide),
+    and the same whole-table replace for ``hidden_book``; a failure rolls the
+    whole thing back and the prior mirror is intact.
     Cover files are written to ``covers_dir`` atomically (tmp +
     ``os.replace``); a failed cover write is logged, not fatal — the rows are
-    the deliverable. Returns ``{"deals": n, "covers": m}``.
+    the deliverable. Returns ``{"deals": n, "hidden_books": h, "covers": m}``.
 
     ``covers_dir`` is an explicit argument (the caller passes
     ``config.DEALS_COVERS_DIR``); the deals DB path is read from config at
@@ -495,6 +503,10 @@ def apply_deals(payload: dict, covers_dir: str | Path) -> dict:
     _check_deals_format(payload)
     deals = payload.get("deals") or []
     covers = payload.get("covers") or {}
+    # `None` (key absent) means a primary that predates per-book hides: leave
+    # ours alone rather than wiping it. An empty LIST is a real instruction --
+    # the primary has no hides -- and clears the table.
+    hidden_books = payload.get("hidden_books")
 
     conn = deals_db.connect(config.DEALS_DB)
     try:
@@ -507,6 +519,12 @@ def apply_deals(payload: dict, covers_dir: str | Path) -> dict:
                 f"INSERT INTO deal ({', '.join(DEAL_COLUMNS)}) VALUES ({placeholders})",
                 [tuple(d.get(c) for c in DEAL_COLUMNS) for d in deals],
             )
+            if hidden_books is not None:
+                hidden_n = deals_db.replace_hidden_books(conn, hidden_books)
+            else:
+                hidden_n = conn.execute(
+                    "SELECT COUNT(*) FROM hidden_book"
+                ).fetchone()[0]
             conn.execute("COMMIT")
         except Exception:
             conn.execute("ROLLBACK")
@@ -530,7 +548,7 @@ def apply_deals(payload: dict, covers_dir: str | Path) -> dict:
         except (OSError, ValueError) as exc:
             log.warning("deals apply: failed to write cover %s: %s", name, exc)
 
-    return {"deals": len(deals), "covers": written}
+    return {"deals": len(deals), "hidden_books": hidden_n, "covers": written}
 
 
 # ---------- advisory sync state (telemetry only; the cursor is the DB) ----------
