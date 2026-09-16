@@ -40,7 +40,7 @@
      bar/log the poller draws; the script below takes over from here. #}
   <div id="owned-log" class="activity-log"{% if not owned_status.log %} hidden{% endif %}>
     {% for line in owned_status.log %}
-    <div class="log-line log-{{ line.level }}"><span class="log-at">{{ line.at }}</span>{{ line.msg }}</div>
+    <div class="log-line log-{{ line.level }}"><span class="log-at">{{ line.at }}</span><span class="log-dash">&mdash;</span><span class="log-msg">{{ line.msg }}</span></div>
     {% endfor %}
   </div>
   <p id="owned-summary" class="hint">
@@ -88,6 +88,13 @@
     return Math.floor(m / 60) + 'h ' + String(m % 60).padStart(2, '0') + 'm';
   }
 
+  function cell(cls, text) {
+    const el = document.createElement('span');
+    el.className = cls;
+    el.textContent = text;
+    return el;
+  }
+
   // The log is capped server-side and lines fall off the FRONT, so an
   // append-by-index render would silently stop once the cap is hit. Redraw the
   // whole thing instead (300 lines, once a second) and skip it when unchanged.
@@ -103,11 +110,11 @@
     for (const line of lines) {
       const row = document.createElement('div');
       row.className = 'log-line log-' + line.level;
-      const at = document.createElement('span');
-      at.className = 'log-at';
-      at.textContent = line.at;
-      row.appendChild(at);
-      row.appendChild(document.createTextNode(line.msg));  // never innerHTML: server text
+      // Three cells, matching the server-rendered markup above: the flex row is
+      // what keeps every message starting at the same column, wraps included.
+      row.appendChild(cell('log-at', line.at));
+      row.appendChild(cell('log-dash', '—'));
+      row.appendChild(cell('log-msg', line.msg));   // textContent, never innerHTML
       logEl.appendChild(row);
     }
     logEl.hidden = lines.length === 0;

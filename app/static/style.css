@@ -137,8 +137,12 @@ table.covers-4x .cover-col { width: 266px; }
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: .78rem; line-height: 1.5;
 }
-.activity-log .log-line { white-space: pre-wrap; overflow-wrap: anywhere; color: var(--muted); }
-.activity-log .log-at { color: #6b7683; margin-right: .6rem; user-select: none; }
+/* A flex row per line, so every message starts at the same column and a
+   wrapped message hangs under itself instead of under the timestamp. */
+.activity-log .log-line { display: flex; align-items: baseline; gap: .55rem; color: var(--muted); }
+.activity-log .log-at,
+.activity-log .log-dash { flex: none; color: #6b7683; user-select: none; }
+.activity-log .log-msg { flex: 1 1 auto; min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
 .activity-log .log-phase { color: var(--text); font-weight: 600; margin-top: .25rem; }
 .activity-log .log-done { color: var(--good); font-weight: 600; }
 .activity-log .log-error { color: var(--bad); }
