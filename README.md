@@ -274,6 +274,36 @@ Two JSON endpoints back the wishlists page UI and can be polled by anything else
 
 On a secondary, `POST /api/scrape/run` returns **403** — mirrors never scrape.
 
+### Owned-books update API
+
+Backs the Settings tab's **Update Owned Books** button (bar + activity window). Primary-only for the trigger; the status is readable on either role:
+
+- `POST /api/owned/update` — starts the run in a background thread and returns immediately; a second call while one is in flight is a no-op (`{"started": false}`), never a second run. Content-negotiated: `Accept: application/json` gets `{"started", "status"}` (202 when it started, 200 when one was already running), anything else gets the `303` PRG redirect back to `/settings`. **403** on a secondary.
+- `GET /api/owned/status` — the progress feed. Shape:
+
+  ```json
+  {
+    "running": true,
+    "started_at": "2026-09-15T22:04:19",
+    "finished_at": null,
+    "phase": "Fetching library 'Amazon rivaborn' (2 of 2)",
+    "step": 2,
+    "total_steps": 7,
+    "elapsed_sec": 41.0,
+    "log": [{"at": "22:04:19", "level": "phase", "msg": "Signing in to Grimmory"}],
+    "last_success_at": null,
+    "last_result": null,
+    "last_error": null,
+    "run_id": 1
+  }
+  ```
+
+  `step` counts **completed** steps, so `step`/`total_steps` drives the bar directly and `phase` names the step in flight. `total_steps` is known before the first step (5 fixed steps + one per `GRIMMORY_LIBRARIES` entry), so the bar is determinate from the first paint rather than a spinner. `log` is the activity window: timestamped lines at level `phase` (a step heading), `info` (detail, e.g. each library's book count), `done`, or `error`. It is capped at the last 300 lines, and lines fall off the **front** — a client must redraw the log rather than append by index.
+
+  `elapsed_sec` is computed server-side because `started_at`/`finished_at` are naive server-**local** time; subtracting them in the browser would be wrong by the timezone offset.
+
+  In-memory only, and deliberately so: a run is minutes, so unlike the wishlist scrape there is no `*.json` mirror and no resume — a restart mid-run loses the commentary (the DB work already committed stands) and the status reads as if nothing has run. A page load mid-run picks the feed up where it is, and closing the tab does not stop the run.
+
 ### Sync API
 
 Served by the **primary** and consumed by the secondary:
@@ -450,7 +480,7 @@ Also confirm the new secondary can reach the new primary on port 9060 — the sy
 
 ## Grimmory book catalog (data/grimmory.db)
 
-A one-off export of the home-lab **Grimmory** (BookLore) ebook libraries into this repo's `data/` directory. It is a separate SQLite file from `wishlist.db` with its own schema — a static catalog snapshot (title, author, publisher, date published, ISBN). The web app reads it (see "Update Owned Books" below) but never writes it directly; it is rebuilt from Grimmory by `scripts/build_grimmory_db.py`, run manually OR automatically: **nightly** as step 1 of the BookBub daily cycle (`bookbub_daily`, immediately before the ownership refresh that reads it), on the 1st of each month by the "Update Owned Books" job (which additionally moves owned wishlist books to Purchased), and on demand via the **"Update Owned Books"** button on the Settings tab.
+A one-off export of the home-lab **Grimmory** (BookLore) ebook libraries into this repo's `data/` directory. It is a separate SQLite file from `wishlist.db` with its own schema — a static catalog snapshot (title, author, publisher, date published, ISBN). The web app reads it (see "Update Owned Books" below) but never writes it directly; it is rebuilt from Grimmory by `scripts/build_grimmory_db.py`, run manually OR automatically: **nightly** as step 1 of the BookBub daily cycle (`bookbub_daily`, immediately before the ownership refresh that reads it), on the 1st of each month by the "Update Owned Books" job (which additionally moves owned wishlist books to Purchased), and on demand via the **"Update Owned Books"** button on the Settings tab — which draws a progress bar and a live activity window (each library fetch, the match counts, the deal rows re-flagged) off `GET /api/owned/status`.
 
 `scripts/build_grimmory_db.py` logs into the Grimmory instance (JWT login via `POST /api/v1/auth/login`, see `app/grimmory.py`), resolves the target libraries by name, fetches every book per library (`GET /api/v1/libraries/{id}/book`), and rebuilds the `book` table in a single transaction (staging table renamed over the old one, so a failed run rolls back and the previous data is left intact):
 

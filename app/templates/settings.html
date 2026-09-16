@@ -30,31 +30,180 @@
 </form>
 
 <h3 style="margin-top:1.6rem">Grimmory owned books</h3>
-<form method="post" action="/api/owned/update">
-  <button type="submit">Update Owned Books</button>
-</form>
+<section id="owned-section">
+  <button id="owned-btn" class="primary" type="button">Update Owned Books</button>
+  <div id="owned-progress" hidden>
+    <progress id="owned-bar" value="0" max="1"></progress>
+    <div id="owned-phase" class="hint"></div>
+  </div>
+  {# Server-rendered so a plain reload (or a no-JS form post) shows the same
+     bar/log the poller draws; the script below takes over from here. #}
+  <div id="owned-log" class="activity-log"{% if not owned_status.log %} hidden{% endif %}>
+    {% for line in owned_status.log %}
+    <div class="log-line log-{{ line.level }}"><span class="log-at">{{ line.at }}</span>{{ line.msg }}</div>
+    {% endfor %}
+  </div>
+  <p id="owned-summary" class="hint">
+    {% if owned_status.running %}
+      <span class="owned-running">&#9654; Update Owned Books is running (started {{ owned_status.started_at or '…' }}).</span>
+    {% else %}
+      {% if owned_status.last_success_at %}
+        Last successful run: <strong>{{ owned_status.last_success_at }}</strong>
+        {% if owned_status.last_result %} &mdash; {{ owned_status.last_result.grimmory_books }} grimmory books,
+        {{ owned_status.last_result.marked_purchased }} marked purchased,
+        {{ owned_status.last_result.deals_refreshed }} deals refreshed{% endif %}
+      {% else %}
+        No owned-books update has run yet.
+      {% endif %}
+      {% if owned_status.last_error %}
+        <br>Last attempt failed: <span class="owned-error">{{ owned_status.last_error }}</span>
+      {% endif %}
+    {% endif %}
+  </p>
+</section>
 <p class="hint">Fetches your Grimmory libraries into the local grimmory.db, then moves
   wishlist books you own from the lists to the <strong>Purchased</strong> tab and refreshes the
   BookBub deals owned flags. Also runs automatically on the 1st of each month. Needs the
   GRIMMORY_USERNAME / GRIMMORY_PASSWORD settings configured; a run takes a few minutes and
-  runs in the background — reload this page to see when it finishes.</p>
-<p class="hint">
-  {% if owned_status.running %}
-    <span class="owned-running">▶ Update Owned Books is running (started {{ owned_status.started_at or '…' }}).</span>
-  {% else %}
-    {% if owned_status.last_success_at %}
-      Last successful run: <strong>{{ owned_status.last_success_at }}</strong>
-      {% if owned_status.last_result %} — {{ owned_status.last_result.grimmory_books }} grimmory books,
-      {{ owned_status.last_result.marked_purchased }} marked purchased,
-      {{ owned_status.last_result.deals_refreshed }} deals refreshed{% endif %}
-    {% else %}
-      No owned-books update has run yet.
-    {% endif %}
-    {% if owned_status.last_error %}
-      <br>Last attempt failed: <span class="owned-error">{{ owned_status.last_error }}</span>
-    {% endif %}
-  {% endif %}
-</p>
+  runs in the background &mdash; the bar and activity window above follow it live, and it keeps
+  going if you leave the page.</p>
+
+<script>
+(function () {
+  const btn = document.getElementById('owned-btn');
+  const wrap = document.getElementById('owned-progress');
+  const bar = document.getElementById('owned-bar');
+  const phase = document.getElementById('owned-phase');
+  const logEl = document.getElementById('owned-log');
+  const summary = document.getElementById('owned-summary');
+  let polling = false;
+  let drawn = '';   // signature of the log currently on screen
+
+  function hhmmss(sec) {
+    if (sec === null || sec === undefined) return '';
+    const s = Math.round(sec);
+    if (s < 60) return s + 's';
+    const m = Math.floor(s / 60);
+    if (m < 60) return m + 'm ' + String(s % 60).padStart(2, '0') + 's';
+    return Math.floor(m / 60) + 'h ' + String(m % 60).padStart(2, '0') + 'm';
+  }
+
+  // The log is capped server-side and lines fall off the FRONT, so an
+  // append-by-index render would silently stop once the cap is hit. Redraw the
+  // whole thing instead (300 lines, once a second) and skip it when unchanged.
+  function renderLog(s) {
+    const lines = s.log || [];
+    const last = lines.length ? lines[lines.length - 1] : null;
+    const sig = s.run_id + '/' + lines.length + '/' + (last ? last.at + last.msg : '');
+    if (sig === drawn) return;
+    drawn = sig;
+    const pinned =
+      logEl.scrollTop + logEl.clientHeight >= logEl.scrollHeight - 8;
+    logEl.textContent = '';
+    for (const line of lines) {
+      const row = document.createElement('div');
+      row.className = 'log-line log-' + line.level;
+      const at = document.createElement('span');
+      at.className = 'log-at';
+      at.textContent = line.at;
+      row.appendChild(at);
+      row.appendChild(document.createTextNode(line.msg));  // never innerHTML: server text
+      logEl.appendChild(row);
+    }
+    logEl.hidden = lines.length === 0;
+    if (pinned) logEl.scrollTop = logEl.scrollHeight;
+  }
+
+  function render(s) {
+    renderLog(s);
+    if (s.total_steps > 0) {
+      bar.max = s.total_steps;
+      bar.value = s.step;
+    } else {
+      bar.removeAttribute('value');
+      bar.max = 1;
+    }
+    const elapsed = hhmmss(s.elapsed_sec);
+    if (s.running) {
+      wrap.hidden = false;
+      btn.disabled = true;
+      btn.textContent = 'Updating…';
+      phase.textContent =
+        (s.phase || 'Starting…') +
+        '  (step ' + Math.min(s.step + 1, s.total_steps) + ' of ' + s.total_steps +
+        (elapsed ? ', ' + elapsed + ' elapsed' : '') + ')';
+      summary.textContent = 'Running — started ' + (s.started_at || '');
+      summary.className = 'hint owned-running';
+    } else {
+      btn.disabled = false;
+      btn.textContent = 'Update Owned Books';
+      if (!s.finished_at) return;            // nothing has run in this process
+      wrap.hidden = false;
+      if (s.last_error) {
+        phase.textContent = 'Failed after ' + elapsed;
+        summary.textContent = 'Last attempt failed: ' + s.last_error;
+        summary.className = 'hint owned-error';
+        return;
+      }
+      const r = s.last_result || {};
+      phase.textContent = 'Finished in ' + elapsed;
+      summary.textContent =
+        'Last successful run: ' + s.last_success_at + ' — ' +
+        (r.grimmory_books || 0) + ' grimmory books, ' +
+        (r.marked_purchased || 0) + ' marked purchased, ' +
+        (r.deals_refreshed || 0) + ' deals refreshed.';
+      summary.className = 'hint';
+    }
+  }
+
+  async function fetchStatus() {
+    const r = await fetch('/api/owned/status', { headers: { Accept: 'application/json' } });
+    return r.json();
+  }
+
+  async function poll() {
+    if (polling) return;
+    polling = true;
+    try {
+      while (true) {
+        const s = await fetchStatus();
+        render(s);
+        if (!s.running) return;
+        await new Promise(r => setTimeout(r, 1000));
+      }
+    } finally {
+      polling = false;
+    }
+  }
+
+  btn.addEventListener('click', async () => {
+    btn.disabled = true;
+    btn.textContent = 'Starting…';
+    const r = await fetch('/api/owned/update', {
+      method: 'POST',
+      headers: { Accept: 'application/json' },
+    });
+    if (!r.ok) {                       // e.g. 403 on a mirror
+      btn.disabled = false;
+      btn.textContent = 'Update Owned Books';
+      summary.textContent = 'Could not start the update (HTTP ' + r.status + ').';
+      summary.className = 'hint owned-error';
+      return;
+    }
+    // The trigger flips `running` before it returns, so this paints the first
+    // frame (and the full bar) without waiting a poll interval.
+    render((await r.json()).status);
+    poll();
+  });
+
+  // A run started before this page load (or by the monthly cron) is picked up.
+  fetchStatus().then(s => {
+    if (s.running) poll();
+    else if (s.finished_at) render(s);
+  });
+})();
+</script>
+
 <p class="hint">The BookBub time runs the whole daily cycle at one time (the same time for all):
   fetch the day's BookBub deals, update the owned-in-grimmory flags, remove duplicates, and
   re-verify every non-expired deal against live Amazon prices — through the NordVPN tunnel,

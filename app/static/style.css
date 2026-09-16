@@ -127,6 +127,21 @@ table.covers-4x .cover-col { width: 266px; }
 .tip.tsize-large::after { font-size: 1.05rem; }
 .owned-running { color: var(--accent); font-weight: 600; }
 .owned-error { color: #e06c75; }
+
+/* "Update Owned Books" progress + activity window (Settings tab) */
+#owned-progress { margin: .75rem 0 .5rem; display: flex; flex-direction: column; gap: .35rem; max-width: 620px; }
+.activity-log {
+  max-width: 620px; max-height: 15rem; overflow-y: auto;
+  margin: 0 0 .6rem; padding: .5rem .6rem;
+  background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: .78rem; line-height: 1.5;
+}
+.activity-log .log-line { white-space: pre-wrap; overflow-wrap: anywhere; color: var(--muted); }
+.activity-log .log-at { color: #6b7683; margin-right: .6rem; user-select: none; }
+.activity-log .log-phase { color: var(--text); font-weight: 600; margin-top: .25rem; }
+.activity-log .log-done { color: var(--good); font-weight: 600; }
+.activity-log .log-error { color: var(--bad); }
 td.cb-col input.purchased-cb { cursor: pointer; transform: scale(1.1); }
 td.cb-col input.purchased-cb:disabled { cursor: progress; }
 

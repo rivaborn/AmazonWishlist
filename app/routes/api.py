@@ -2,7 +2,7 @@ import re
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
-from fastapi import APIRouter, Body, Depends, Form, HTTPException
+from fastapi import APIRouter, Body, Depends, Form, HTTPException, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 
 from .. import config, deals_db, services, settings
@@ -186,13 +186,33 @@ def save_settings(
 
 
 @router.post("/owned/update", dependencies=[Depends(_require_primary)])
-def owned_update_run():
+def owned_update_run(request: Request):
     """Trigger "Update Owned Books": refresh grimmory.db from Grimmory and move
     owned books to Purchased. Primary-only (mirrors are read-only). Long-running,
     so it runs in a background thread (see app.owned_update); this endpoint just
-    kicks it off and PRG-reloads the Settings tab, which shows the run status.
+    kicks it off -- the caller then watches GET /api/owned/status.
+
+    Content-negotiated so both callers keep working: the Settings tab's button
+    asks for JSON and starts polling, while a plain form post (or curl) gets the
+    PRG redirect back to the tab, which renders the same status server-side.
     """
     from .. import owned_update
 
-    owned_update.trigger_owned_update()
+    started = owned_update.trigger_owned_update()
+    if "application/json" in (request.headers.get("accept") or ""):
+        return JSONResponse(
+            {"started": started, "status": owned_update.owned_update_status()},
+            status_code=202 if started else 200,
+        )
     return RedirectResponse(url="/settings", status_code=303)
+
+
+@router.get("/owned/status")
+def owned_update_progress():
+    """Progress feed for the Settings tab's bar + activity window: the current
+    phase, steps done/total, and the run's timestamped activity log. Unguarded
+    like /api/scrape/status -- it is read-only, and a mirror reports an idle run.
+    """
+    from .. import owned_update
+
+    return owned_update.owned_update_status()

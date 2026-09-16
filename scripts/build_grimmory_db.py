@@ -64,12 +64,24 @@ def _table_exists(conn, name: str) -> bool:
     )
 
 
-def build(token: str, db_path: Path) -> dict:
+def build(token: str, db_path: Path, *, on_progress=None) -> dict:
     """Fetch every target library's books and (re)write the book table.
 
     Returns {library_name: book_count}. The whole rebuild is one
     transaction; on any error it rolls back and the old table survives.
+
+    ``on_progress(kind, msg)`` is an optional callback for a caller that wants
+    to narrate the run -- ``kind`` is ``"phase"`` for the three milestones
+    (list the libraries, fetch each one, write the DB) and ``"note"`` for
+    detail. It is called synchronously on this thread; it must not raise. Both
+    CLI callers leave it unset. See app/owned_update.py for the consumer.
     """
+
+    def report(kind: str, msg: str) -> None:
+        if on_progress is not None:
+            on_progress(kind, msg)
+
+    report("phase", "Listing the Grimmory libraries")
     libraries = grimmory.list_libraries(token)
     by_name = {lib.get("name"): lib for lib in libraries if isinstance(lib, dict)}
 
@@ -83,14 +95,19 @@ def build(token: str, db_path: Path) -> dict:
             + f" (available: {available})"
         )
 
+    report("note", f"{len(by_name)} libraries on the server, {len(targets)} targeted")
+
     rows = []
     per_library = {}
-    for name in targets:
+    for i, name in enumerate(targets, start=1):
         lib = by_name[name]
+        report("phase", f"Fetching library {name!r} ({i} of {len(targets)})")
         books = grimmory.fetch_library_books(token, lib.get("id"))
         rows.extend(grimmory.books_to_rows(books, lib.get("id"), name))
         per_library[name] = len(books)
+        report("note", f"{name}: {len(books):,} books")
 
+    report("phase", f"Writing {len(rows):,} books to {db_path.name}")
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(db_path, isolation_level=None)
     try:

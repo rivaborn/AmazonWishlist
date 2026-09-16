@@ -409,6 +409,60 @@ def _check_hidden_books() -> None:
         config.DEALS_DB, config.DEALS_COVERS_DIR = prev_db, prev_covers
 
 
+def _check_owned_progress() -> None:
+    """The "Update Owned Books" progress feed: bar arithmetic + activity log.
+
+    No network: this drives the reporting primitives directly, which is the
+    part the Settings tab reads. What must hold is that the bar is determinate
+    (total_steps known before the first step), that a step is banked exactly
+    once, and that the log stays bounded -- the page renders it in full on
+    every poll.
+    """
+    from app import owned_update as ou
+
+    total = ou._total_steps()
+    assert total >= 6, total  # 5 fixed steps + at least one library
+
+    ou._STATUS.update(running=True, started_at=datetime.now().isoformat(timespec="seconds"),
+                      finished_at=None, phase=None, step=0, total_steps=total,
+                      log=[], run_id=1, last_error=None)
+    ou._phase("first step")
+    assert ou._STATUS["step"] == 0, "the first step must not bank a predecessor"
+    ou._note("detail under the first step")
+    assert ou._STATUS["step"] == 0, "a note must not move the bar"
+    ou._phase("second step")
+    assert ou._STATUS["step"] == 1, ou._STATUS["step"]
+
+    # build_grimmory_db reports through this adapter; "phase" advances, else not.
+    ou._relay("phase", "third step")
+    ou._relay("note", "a library count")
+    assert ou._STATUS["step"] == 2, ou._STATUS["step"]
+
+    status = ou.owned_update_status()
+    assert status["phase"] == "third step", status
+    assert status["elapsed_sec"] is not None and status["elapsed_sec"] >= 0, status
+    assert [ln["msg"] for ln in status["log"]][0] == "first step", status["log"]
+    assert {ln["level"] for ln in status["log"]} == {"phase", "info"}, status["log"]
+    # The snapshot must be a copy: later lines cannot appear in an earlier one.
+    ou._note("after the snapshot")
+    assert len(status["log"]) == 5, status["log"]
+
+    # The log is bounded, and it drops the OLDEST lines.
+    for i in range(ou._MAX_LOG_LINES + 25):
+        ou._note(f"flood {i}")
+    log = ou.owned_update_status()["log"]
+    assert len(log) == ou._MAX_LOG_LINES, len(log)
+    assert log[-1]["msg"] == f"flood {ou._MAX_LOG_LINES + 24}", log[-1]
+    assert not any(ln["msg"] == "first step" for ln in log), "old lines must fall off"
+
+    # An idle status (fresh process) must still answer the shape the page reads.
+    ou._STATUS.update(running=False, started_at=None, finished_at=None, phase=None,
+                      step=0, total_steps=0, log=[], last_result=None, last_error=None)
+    idle = ou.owned_update_status()
+    assert idle["elapsed_sec"] is None and idle["log"] == [], idle
+    print(f"owned progress: {total} steps, log capped at {ou._MAX_LOG_LINES} lines")
+
+
 def _check_owned_matching() -> None:
     """Ownership matching survives an author written surname-first.
 
@@ -724,6 +778,7 @@ def main() -> int:
     _check_sync(wid)
     _check_hidden_books()
     _check_owned_matching()
+    _check_owned_progress()
 
     # Hit every page through the HTTP layer
     paths = [
@@ -737,6 +792,8 @@ def main() -> int:
         "/login",
         "/api/login/status",
         "/api/sync/status",
+        "/settings",
+        "/api/owned/status",
         "/deals?min_dollar=2&min_pct=20&basis=list",
     ]
     with TestClient(app) as c:
