@@ -1,184 +1,799 @@
+/* ==========================================================================
+   Bauhaus Geometric — design tokens
+   --------------------------------------------------------------------------
+   Everything below this block is built FROM these tokens; no component
+   hard-codes a colour or a size. Primitives first, then the semantic names
+   the components (and a couple of inline styles in login.html) refer to.
+
+   Dark mode swaps paper and ink ONLY. The primaries are identical in both
+   themes, which is why text that sits on a coloured block cannot use the
+   swapping --ink/--paper: it would invert with the theme and lose contrast.
+   Those cases use the pinned --ink-fixed / --paper-fixed pair.
+   ========================================================================== */
 :root {
-  --bg: #0f1115;
-  --panel: #161a22;
-  --text: #e6e8eb;
-  --muted: #9aa3ad;
-  --accent: #ffb43a;
-  --good: #57c785;
-  --bad: #e35d6a;
-  --border: #232a35;
+  /* -- colour primitives -- */
+  --paper: #F4F1EA;
+  --ink: #111111;
+  --ink-fixed: #111111;      /* never swaps: text on yellow */
+  --paper-fixed: #F4F1EA;    /* never swaps: text on red/blue/green */
+  --red: #E63329;
+  --blue: #1D4ED8;
+  --yellow: #F6C90E;
+  --green: #2E8B57;
+
+  /* -- semantic roles (flat blocks, black outline; no tints) -- */
+  --success: var(--green);
+  --warning: var(--yellow);
+  --danger: var(--red);
+  --info: var(--blue);
+
+  /* The pre-Bauhaus palette (--bg/--panel/--text/--muted/--accent/--good/--bad/
+     --border) is gone, along with the two inline styles in login.html that were
+     its last consumers: one name per thing. Grep for var(-- before reviving any
+     of them. */
+
+  /* -- type -- */
+  --font-sans: Futura, Jost, "Century Gothic", "Josefin Sans", "Space Grotesk",
+               "Trebuchet MS", system-ui, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --fs-xs: 14px;
+  --fs-base: 16px;
+  --fs-md: 20px;
+  --fs-lg: 28px;
+  --fs-xl: 40px;
+  --fs-2xl: 56px;
+  --fs-3xl: 88px;
+  --lh-tight: 1.0;
+  --lh-body: 1.5;
+  --track-caps: 0.06em;      /* letter-spacing on uppercase */
+  --track-caps-tight: 0.02em;
+  --w-body: 400;
+  --w-med: 500;
+  --w-bold: 700;
+
+  /* -- spacing: 8px base -- */
+  --sp-1: 8px;
+  --sp-2: 16px;
+  --sp-3: 24px;
+  --sp-4: 40px;
+  --sp-5: 64px;
+  --sp-6: 104px;
+
+  /* -- rules: 2px minimum, heavy rules divide major regions -- */
+  --rule-thin: 1px;          /* table row rules only (see Tables) */
+  --rule: 2px;
+  --rule-mid: 3px;
+  --rule-heavy: 4px;
+  --rule-major: 8px;
+
+  /* -- geometry -- */
+  --radius: 0;
+  --radius-circle: 50%;
+  --control-h: 48px;
+  --control-pad: var(--sp-3);
+  --maxw: 1240px;
+  --gutter: var(--sp-3);
+  --shape: 28px;             /* a decorative circle/square/triangle */
+  --dot: 10px;               /* the nav's active marker, a status square */
+  --cell: 32px;              /* a small square: page cell, compact select */
+  --panel-w: 620px;          /* progress bar, step strip, activity log */
+  --stat-w: 160px;
+  --log-h: 15rem;
+  --vnc-h: 720px;
+  /* BookBub cover thumbnails: the three sizes the cover_size setting selects,
+     and the column width each needs (image + the cell's own padding). */
+  --cover-1x: 64px;
+  --cover-2x: 128px;
+  --cover-4x: 256px;
+  --cover-pad: 14px;
+
+  /* -- motion: mechanical, never bouncy -- */
+  --dur: 150ms;
+  --dur-assemble: 400ms;
+  --ease: linear;
 }
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --paper: #141414;
+    --ink: #F4F1EA;
+  }
+}
+
+/* ==========================================================================
+   Base
+   ========================================================================== */
 * { box-sizing: border-box; }
-html, body { margin: 0; padding: 0; background: var(--bg); color: var(--text);
-  font: 15px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
-header {
-  padding: 1rem 1.5rem; border-bottom: 1px solid var(--border);
-  background: var(--panel); display: flex; align-items: baseline; gap: 2rem; flex-wrap: wrap;
+
+/* Any `display` we set on a component out-specifies the UA's [hidden] rule, so
+   panels the templates start hidden (#scrape-progress, #owned-progress,
+   #owned-log, #vnc-wrap) would render anyway. Restore the attribute's meaning
+   once, here, rather than remembering it at every component. */
+[hidden] { display: none !important; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  font-size: var(--fs-base);
+  font-weight: var(--w-body);
+  line-height: var(--lh-body);
 }
-header h1 { margin: 0; font-size: 1.2rem; letter-spacing: 0.02em; }
-nav a { color: var(--muted); text-decoration: none; margin-right: 1rem; padding: .25rem .5rem; border-radius: 4px; }
-nav a.active, nav a:hover { color: var(--accent); background: rgba(255,180,58,.08); }
-main { padding: 1.5rem; max-width: 1200px; margin: 0 auto; }
-h2 { margin-top: 0; }
-section { margin-bottom: 2rem; }
-table { width: 100%; border-collapse: collapse; background: var(--panel);
-  border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
-/* The bookBub deals table must NOT clip its description tooltips — they are
-   66vw and would be sliced at the table's edge. Other tables keep overflow:
-   hidden for the rounded-corner background clip. */
-table.covers-1x, table.covers-2x, table.covers-4x { overflow: visible; }
-th, td { padding: .55rem .75rem; text-align: left; border-bottom: 1px solid var(--border); }
-th { background: rgba(255,255,255,.03); font-weight: 600; font-size: .85rem; color: var(--muted); }
-tr:last-child td { border-bottom: 0; }
-td a { color: var(--accent); text-decoration: none; }
-td a:hover { text-decoration: underline; }
-.ts { color: var(--muted); font-size: .8rem; white-space: nowrap; }
-.empty { color: var(--muted); font-style: italic; }
-.hint { color: var(--muted); font-size: .85rem; }
-.filters, .add-form { display: flex; flex-wrap: wrap; gap: 1rem; align-items: end; margin-bottom: 1rem; }
-.filters label, .add-form label { display: flex; flex-direction: column; gap: .25rem; font-size: .8rem; color: var(--muted); }
-input, select, button {
-  background: var(--bg); color: var(--text); border: 1px solid var(--border);
-  padding: .4rem .6rem; border-radius: 4px; font: inherit;
-}
-button { cursor: pointer; }
-button:hover { border-color: var(--accent); }
-button.primary { background: var(--accent); color: #1a1300; border-color: var(--accent); font-weight: 600; }
-button.danger { color: var(--bad); border-color: transparent; background: transparent; }
-button.danger:hover { background: rgba(227,93,106,.1); border-color: var(--bad); }
-button:disabled { opacity: .55; cursor: progress; }
-#scrape-progress { margin: .75rem 0; display: flex; flex-direction: column; gap: .35rem; max-width: 520px; }
-progress { width: 100%; height: 14px; appearance: none; -webkit-appearance: none; }
-progress::-webkit-progress-bar { background: var(--bg); border: 1px solid var(--border); border-radius: 4px; }
-progress::-webkit-progress-value { background: var(--accent); border-radius: 3px; transition: width .25s ease; }
-progress::-moz-progress-bar { background: var(--accent); }
-progress:not([value]) { background: linear-gradient(90deg, var(--bg), var(--accent), var(--bg)) 0/200% 100%; animation: indet 1.2s linear infinite; border: 1px solid var(--border); border-radius: 4px; }
-@keyframes indet { 0% { background-position: 0 0; } 100% { background-position: -200% 0; } }
-.summary { display: flex; gap: 1rem; flex-wrap: wrap; margin-bottom: 1rem; }
-.stat { background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: .6rem 1rem; min-width: 120px; }
-.stat-label { display: block; font-size: .75rem; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
-.stat-value { display: block; font-size: 1.4rem; font-weight: 600; color: var(--accent); margin-top: .15rem; }
 
-.pager { display: flex; flex-wrap: wrap; gap: .35rem; align-items: center; padding: .6rem 0; font-size: .9rem; }
-.pager .pg { padding: .25rem .55rem; border: 1px solid var(--border); border-radius: 4px; color: var(--muted); text-decoration: none; }
-.pager a.pg:hover { color: var(--accent); border-color: var(--accent); }
-.pager .pg.current { background: var(--accent); color: #1a1300; border-color: var(--accent); font-weight: 600; }
-.pager .pg.disabled { opacity: .35; pointer-events: none; }
-.pager .pg.gap { border-color: transparent; padding: .25rem .25rem; }
-.pg-meta { margin-left: auto; color: var(--muted); font-size: .8rem; }
-td.abnormal { color: var(--bad); font-weight: 600; }
-td.stale { color: var(--muted); }
-.stale-badge { display: inline-block; margin-left: .4rem; padding: .05rem .35rem; border: 1px solid var(--bad);
-               border-radius: 3px; color: var(--bad); font-size: .7rem; font-weight: 600; letter-spacing: .03em; }
-.cb-col { width: 28px; padding-left: .5rem; padding-right: .25rem; }
-/* BookBub Deals tab: cover thumbnail column + per-page dropdown. */
-.cover-col { width: 38px; }
-td.cover-col img.deal-cover { width: 30px; height: auto; border-radius: 2px; vertical-align: middle; }
-.per-page { white-space: nowrap; margin-left: .75rem; display: inline-flex; align-items: center; gap: .35rem; }
-.per-page select { padding: .1rem .3rem; font-size: .85rem; }
-/* Cover-size variants (1x/2x/4x) — the stored cover_size setting drives the
-   `size-*` class on each cover and the `covers-*` class on the table, so the
-   column widens with the image instead of clipping it. */
-td.cover-col img.deal-cover.size-1x { width: 64px; }
-td.cover-col img.deal-cover.size-2x { width: 128px; }
-td.cover-col img.deal-cover.size-4x { width: 256px; }
-table.covers-1x .cover-col { width: 74px; }
-table.covers-2x .cover-col { width: 138px; }
-table.covers-4x .cover-col { width: 266px; }
-
-/* ---------- BookBub description tooltips (custom CSS, resizable) ----------
-   The description was a native `title` attribute, whose font size the browser
-   controls and CSS cannot change. So the template renders a custom CSS tooltip
-   instead (.tip[data-tip], shown via ::after on hover) whose text size the
-   BookBub Deals "Tooltip size" dropdown sets with a `tsize-*` class.
-   Sizes: small/normal/large. */
-.tip { position: relative; display: inline-block; cursor: help; }
-.tip::after {
-  content: attr(data-tip);
-  position: absolute;
-  bottom: 110%;
-  /* Anchor to the element's LEFT edge and let the box extend rightward into
-     the page. The old centered (left:50%; translateX(-50%)) placement clipped
-     off-screen for the left-anchored cover, and the 260px cap made long
-     descriptions into very tall boxes. Wide + viewport-capped = always fits. */
-  left: 0;
-  /* Content-sized (short descriptions stay small) but capped at a
-     comfortable ~68-character reading width that scales with the tooltip's
-     font size (small/normal/large, since `ch` = the average width of a '0'
-     at that size), and 90vw so it never overflows the screen. */
-  width: max-content;
-  max-width: min(68ch, 90vw);
-  white-space: normal;
-  overflow-wrap: anywhere;   /* break long unbroken text so it never clips */
-  background: #1c1c1c;
-  color: #f0f0f0;
-  line-height: 1.4;
-  padding: 6px 9px;
-  border-radius: 4px;
-  box-shadow: 0 2px 6px rgba(0, 0, 0, .35);
-  z-index: 60;
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity .15s;
-}
-.tip:hover::after { opacity: 1; }
-.tip.tsize-small::after { font-size: .72rem; }
-.tip.tsize-normal::after { font-size: .85rem; }
-.tip.tsize-large::after { font-size: 1.05rem; }
-.owned-running { color: var(--accent); font-weight: 600; }
-.owned-error { color: #e06c75; }
-
-/* "Update Owned Books" progress + activity window (Settings tab) */
-#owned-progress { margin: .75rem 0 .5rem; display: flex; flex-direction: column; gap: .35rem; max-width: 620px; }
-.activity-log {
-  max-width: 620px; max-height: 15rem; overflow-y: auto;
-  margin: 0 0 .6rem; padding: .5rem .6rem;
-  background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: .78rem; line-height: 1.5;
-}
-/* A flex row per line, so every message starts at the same column and a
-   wrapped message hangs under itself instead of under the timestamp. */
-.activity-log .log-line { display: flex; align-items: baseline; gap: .55rem; color: var(--muted); }
-.activity-log .log-at,
-.activity-log .log-dash { flex: none; color: #6b7683; user-select: none; }
-.activity-log .log-msg { flex: 1 1 auto; min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
-.activity-log .log-phase { color: var(--text); font-weight: 600; margin-top: .25rem; }
-.activity-log .log-done { color: var(--good); font-weight: 600; }
-.activity-log .log-error { color: var(--bad); }
-td.cb-col input.purchased-cb { cursor: pointer; transform: scale(1.1); }
-td.cb-col input.purchased-cb:disabled { cursor: progress; }
-
-/* ---------- mirror mode (WISHLIST_ROLE=secondary) ---------- */
-
-.role-badge {
-  font-size: 0.5em;
-  vertical-align: middle;
-  padding: 0.15em 0.5em;
-  border-radius: 3px;
-  background: #444;
-  color: #eee;
-  letter-spacing: 0.05em;
+/* Headings are the structure, so they are tight, bold and uppercase. */
+h1, h2, h3 {
+  margin: 0 0 var(--sp-2);
+  font-weight: var(--w-bold);
+  line-height: var(--lh-tight);
   text-transform: uppercase;
+  letter-spacing: var(--track-caps-tight);
+}
+h1 { font-size: var(--fs-lg); }
+h2 { font-size: var(--fs-xl); margin-bottom: var(--sp-3); }
+h3 { font-size: var(--fs-md); letter-spacing: var(--track-caps); }
+
+/* A heavy rule under every h2 divides the page's major regions. The h2 sits in
+   the left columns and the rule runs the full measure under it. */
+h2 {
+  padding-bottom: var(--sp-2);
+  border-bottom: var(--rule-major) solid var(--ink);
+}
+/* Section headings get a lighter rule and a blue bar marking the section. */
+h3 {
+  padding-left: var(--sp-2);
+  border-left: var(--rule-major) solid var(--info);
 }
 
+p { margin: 0 0 var(--sp-2); max-width: 68ch; }
+
+a { color: var(--info); text-decoration: none; font-weight: var(--w-med); }
+a:hover { text-decoration: underline; text-decoration-thickness: var(--rule); }
+
+code {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  padding: 0 var(--sp-1);
+  border: var(--rule) solid var(--ink);
+}
+
+strong { font-weight: var(--w-bold); }
+
+/* ==========================================================================
+   Layout — top bar, grid, sections
+   ========================================================================== */
+header {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  flex-wrap: wrap;
+  padding: var(--sp-2) var(--sp-3);
+  background: var(--paper);
+  border-bottom: var(--rule-heavy) solid var(--ink);
+}
+
+/* The wordmark is a geometric mark: a red circle overlapping a blue square,
+   drawn from the .mark element in base.html. Overlap is how this system
+   suggests layering -- there are no shadows. */
+.mark {
+  position: relative;
+  flex: none;
+  /* the square, plus the circle's half-width overlap */
+  width: calc(var(--shape) * 1.5 + var(--sp-1) / 4);
+  height: var(--shape);
+}
+.mark::before,
+.mark::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  width: var(--shape);
+  height: var(--shape);
+}
+.mark::before { left: 0; background: var(--info); }                          /* square */
+.mark::after  { left: calc(var(--shape) / 2 + var(--sp-1) / 4); background: var(--danger); border-radius: var(--radius-circle); }
+
+header h1 {
+  margin: 0;
+  font-size: var(--fs-md);
+  letter-spacing: var(--track-caps);
+}
+
+nav { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-2); }
+nav a {
+  position: relative;
+  color: var(--ink);
+  font-size: var(--fs-xs);
+  font-weight: var(--w-bold);
+  text-transform: uppercase;
+  letter-spacing: var(--track-caps);
+  padding: var(--sp-1) 0;
+  border-bottom: var(--rule) solid transparent;
+}
+nav a:hover { text-decoration: none; border-bottom-color: var(--ink); }
+/* The active link carries a small filled circle beside it. */
+nav a.active { border-bottom-color: var(--danger); padding-left: var(--sp-2); }
+nav a.active::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 50%;
+  width: var(--dot);
+  height: var(--dot);
+  margin-top: calc(var(--dot) / -2);
+  background: var(--danger);
+  border-radius: var(--radius-circle);
+}
+
+main {
+  max-width: var(--maxw);
+  margin: 0 auto;
+  padding: var(--sp-4) var(--gutter) var(--sp-6);
+}
+
+section { margin-bottom: var(--sp-4); }
+
+/* ==========================================================================
+   Buttons — 48px, 2px black border, uppercase tracked label
+   ========================================================================== */
+button {
+  min-height: var(--control-h);
+  padding: 0 var(--control-pad);
+  background: var(--paper);
+  color: var(--ink);
+  border: var(--rule) solid var(--ink);
+  border-radius: var(--radius);
+  font-family: var(--font-sans);
+  font-size: var(--fs-xs);
+  font-weight: var(--w-bold);
+  text-transform: uppercase;
+  letter-spacing: var(--track-caps);
+  cursor: pointer;
+  transition: background var(--dur) var(--ease), color var(--dur) var(--ease);
+}
+button:hover { background: var(--ink); color: var(--paper); }
+
+/* Primary action = blue fill. Paper text is pinned so it stays legible when
+   the theme swaps. */
+button.primary {
+  background: var(--info);
+  color: var(--paper-fixed);
+  border-color: var(--ink);
+}
+button.primary:hover { background: var(--ink); color: var(--paper); }
+
+/* Destructive = red, but as an outlined block that fills on hover rather than
+   a permanently shouting one. */
+button.danger { background: var(--paper); color: var(--danger); }
+button.danger:hover { background: var(--danger); color: var(--paper-fixed); }
+
+/* Disabled is expressed as "outlined and dashed", never as a tint: filled =
+   actionable, outlined = inert. A primary drops its fill for the same reason. */
+button:disabled,
+button.primary:disabled {
+  background: var(--paper);
+  color: var(--ink);
+  border-color: var(--ink);
+  border-style: dashed;
+  cursor: progress;
+}
+button:disabled:hover, button.primary:disabled:hover { background: var(--paper); color: var(--ink); }
+
+:focus-visible { outline: var(--rule-mid) solid var(--info); outline-offset: var(--rule); }
+
+/* ==========================================================================
+   Inputs — 48px, 2px black border, no radius, 3px blue focus outline
+   ========================================================================== */
+input, select {
+  min-height: var(--control-h);
+  padding: 0 var(--sp-2);
+  background: var(--paper);
+  color: var(--ink);
+  border: var(--rule) solid var(--ink);
+  border-radius: var(--radius);
+  font-family: var(--font-sans);
+  font-size: var(--fs-base);
+}
+input:focus, select:focus {
+  outline: var(--rule-mid) solid var(--info);
+  outline-offset: 0;
+}
+input[type="checkbox"] {
+  min-height: 0;
+  width: var(--sp-3);
+  height: var(--sp-3);
+  accent-color: var(--danger);
+  cursor: pointer;
+}
+
+/* Form rows sit on the grid: label above control, controls aligned on a
+   baseline, the whole row separated from what follows by a rule. */
+.filters, .add-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  align-items: end;
+  margin-bottom: var(--sp-3);
+  padding-bottom: var(--sp-3);
+  border-bottom: var(--rule) solid var(--ink);
+}
+.filters label, .add-form label {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  font-size: var(--fs-xs);
+  font-weight: var(--w-bold);
+  text-transform: uppercase;
+  letter-spacing: var(--track-caps);
+  color: var(--ink);
+}
+
+/* The BookBub control strip (per-page / rating / sizes) is a row of small
+   labelled selects inside a paragraph, so it stays inline. */
+.per-page, .show-hidden {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  margin-right: var(--sp-2);
+  white-space: nowrap;
+  font-size: var(--fs-xs);
+  font-weight: var(--w-bold);
+  text-transform: uppercase;
+  letter-spacing: var(--track-caps);
+}
+.per-page select {
+  min-height: var(--cell);
+  padding: 0 var(--sp-1);
+  font-size: var(--fs-xs);
+}
+.show-hidden input { width: var(--sp-2); height: var(--sp-2); }
+
+/* ==========================================================================
+   Tables — 3px header rule, 1px row rules, tabular figures
+   The 1px row rule is the one deliberate exception to the 2px minimum: inside
+   a bordered block these read as grid lines, not as hairline decoration.
+   ========================================================================== */
+table {
+  width: 100%;
+  border-collapse: collapse;
+  background: var(--paper);
+  border: var(--rule) solid var(--ink);
+  border-radius: var(--radius);
+  font-variant-numeric: tabular-nums;
+}
+th, td {
+  padding: var(--sp-1) var(--sp-2);
+  text-align: left;
+  border-bottom: var(--rule-thin) solid var(--ink);
+}
+thead th {
+  font-size: var(--fs-xs);
+  font-weight: var(--w-bold);
+  text-transform: uppercase;
+  letter-spacing: var(--track-caps);
+  color: var(--ink);
+  border-bottom: var(--rule-mid) solid var(--ink);
+}
+tbody tr:last-child td { border-bottom: 0; }
+td a { color: var(--info); }
+thead th a { color: var(--ink); }
+thead th a.sort-active { color: var(--danger); }
+
+.ts { font-size: var(--fs-xs); white-space: nowrap; }
+.stars { white-space: nowrap; font-weight: var(--w-bold); }
+.stars .rt { font-weight: var(--w-body); font-size: var(--fs-xs); }
+
+/* A coloured square marks status: red for a count outside its expected range,
+   yellow for a row nobody has refreshed lately. */
+td.abnormal { color: var(--danger); font-weight: var(--w-bold); }
+td.abnormal::before,
+td.stale::before {
+  content: "";
+  display: inline-block;
+  width: var(--dot);
+  height: var(--dot);
+  margin-right: var(--sp-1);
+  vertical-align: middle;
+  background: var(--danger);
+}
+td.stale::before { background: var(--warning); }
+
+.stale-badge {
+  display: inline-block;
+  margin-left: var(--sp-1);
+  padding: 0 var(--sp-1);
+  background: var(--warning);
+  color: var(--ink-fixed);          /* yellow always takes ink text */
+  border: var(--rule) solid var(--ink);
+  font-size: var(--fs-xs);
+  font-weight: var(--w-bold);
+  text-transform: uppercase;
+  letter-spacing: var(--track-caps);
+}
+
+.cb-col { width: var(--sp-4); padding-right: var(--sp-1); }
+td.cb-col input.purchased-cb, td.cb-col input.hide-cb { cursor: pointer; }
+td.cb-col input:disabled { cursor: progress; }
+
+/* The BookBub deals table must NOT clip its description tooltips -- they are
+   wider than the table and would be sliced at its edge. */
+table.covers-1x, table.covers-2x, table.covers-4x { overflow: visible; }
+
+/* Cover thumbnails: the stored cover_size drives both the image's size-* class
+   and the table's covers-* class, so the column widens with the image. */
+.cover-col { width: var(--sp-4); }
+td.cover-col img.deal-cover {
+  display: block;
+  height: auto;
+  border: var(--rule) solid var(--ink);
+  border-radius: var(--radius);
+}
+td.cover-col img.deal-cover.size-1x { width: var(--cover-1x); }
+td.cover-col img.deal-cover.size-2x { width: var(--cover-2x); }
+td.cover-col img.deal-cover.size-4x { width: var(--cover-4x); }
+table.covers-1x .cover-col { width: calc(var(--cover-1x) + var(--cover-pad)); }
+table.covers-2x .cover-col { width: calc(var(--cover-2x) + var(--cover-pad)); }
+table.covers-4x .cover-col { width: calc(var(--cover-4x) + var(--cover-pad)); }
+
+/* ==========================================================================
+   Stat cards — bordered blocks, each anchored by one primary
+   ========================================================================== */
+.summary { display: flex; gap: var(--sp-2); flex-wrap: wrap; margin-bottom: var(--sp-3); }
+.stat {
+  position: relative;
+  min-width: var(--stat-w);
+  padding: var(--sp-2) var(--sp-3);
+  background: var(--paper);
+  border: var(--rule) solid var(--ink);
+  border-radius: var(--radius);
+}
+/* One primary per card, in order. Three cards, three primaries -- the system
+   stays closed. */
+.stat:nth-child(1) { border-top: var(--rule-major) solid var(--danger); }
+.stat:nth-child(2) { border-top: var(--rule-major) solid var(--info); }
+.stat:nth-child(3) { border-top: var(--rule-major) solid var(--warning); }
+.stat-label {
+  display: block;
+  font-size: var(--fs-xs);
+  font-weight: var(--w-bold);
+  text-transform: uppercase;
+  letter-spacing: var(--track-caps);
+}
+.stat-value {
+  display: block;
+  margin-top: var(--sp-1);
+  font-size: var(--fs-lg);
+  font-weight: var(--w-bold);
+  line-height: var(--lh-tight);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ==========================================================================
+   Pagination — square page cells, the current one filled
+   ========================================================================== */
+.pager {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-1);
+  align-items: center;
+  padding: var(--sp-2) 0;
+}
+.pager .pg {
+  min-width: var(--cell);
+  padding: var(--sp-1);
+  text-align: center;
+  border: var(--rule) solid var(--ink);
+  border-radius: var(--radius);
+  color: var(--ink);
+  font-size: var(--fs-xs);
+  font-weight: var(--w-bold);
+  text-transform: uppercase;
+  letter-spacing: var(--track-caps);
+  font-variant-numeric: tabular-nums;
+}
+.pager a.pg:hover { background: var(--ink); color: var(--paper); text-decoration: none; }
+.pager .pg.current { background: var(--danger); color: var(--paper-fixed); }
+.pager .pg.disabled { border-style: dashed; pointer-events: none; }
+.pager .pg.gap { border-color: transparent; }
+/* The meta also renders on its own (a single-page result), where it is a plain
+   block -- `margin-left: auto` there would shove it to the right margin. Only
+   push it when it is actually the last cell of the pager row. */
+.pager .pg-meta { margin-left: auto; }
+.pg-meta {
+  max-width: none;
+  font-size: var(--fs-xs);
+  font-weight: var(--w-bold);
+  text-transform: uppercase;
+  letter-spacing: var(--track-caps);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ==========================================================================
+   Progress — an ink track with a red filled segment
+   ========================================================================== */
+#scrape-progress, #owned-progress {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  max-width: var(--panel-w);
+  margin: var(--sp-2) 0;
+}
+progress {
+  width: 100%;
+  height: var(--sp-3);
+  appearance: none;
+  -webkit-appearance: none;
+  background: var(--ink);
+  border: var(--rule) solid var(--ink);
+  border-radius: var(--radius);
+}
+progress::-webkit-progress-bar { background: var(--ink); border-radius: var(--radius); }
+progress::-webkit-progress-value { background: var(--danger); border-radius: var(--radius); transition: width var(--dur) var(--ease); }
+progress::-moz-progress-bar { background: var(--danger); }
+
+/* Indeterminate: a solid red block sliding along the rule. The hard colour
+   stops are flat blocks, not a gradient blend -- nothing fades.
+   Applied to the element (Firefox) AND to ::-webkit-progress-bar, which paints
+   over the element's own background in WebKit/Blink. */
+progress:not([value]),
+progress:not([value])::-webkit-progress-bar {
+  background-color: var(--ink);
+  background-image: linear-gradient(
+    90deg,
+    transparent 0 34%, var(--danger) 34% 66%, transparent 66% 100%
+  );
+  background-size: 300% 100%;
+  background-repeat: no-repeat;
+  animation: slide 1.2s var(--ease) infinite;
+}
+/* Firefox paints an indeterminate ::-moz-progress-bar of its own on top. */
+progress:not([value])::-moz-progress-bar { background: transparent; }
+@keyframes slide {
+  from { background-position: 100% 0; }
+  to   { background-position: -100% 0; }
+}
+
+/* Steps as numbered circles connected by a rule (Settings tab; the markup is
+   built by the poller in settings.html from step/total_steps). */
+.steps {
+  position: relative;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin: var(--sp-2) 0;
+  max-width: var(--panel-w);
+}
+/* the rule the circles sit on */
+.steps::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 50%;
+  height: var(--rule);
+  margin-top: calc(var(--rule) / -2);
+  background: var(--ink);
+}
+.steps .step {
+  position: relative;
+  width: var(--shape);
+  height: var(--shape);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--paper);
+  color: var(--ink);
+  border: var(--rule) solid var(--ink);
+  border-radius: var(--radius-circle);
+  font-size: var(--fs-xs);
+  font-weight: var(--w-bold);
+  font-variant-numeric: tabular-nums;
+  transition: background var(--dur) var(--ease), color var(--dur) var(--ease);
+}
+.steps .step.done { background: var(--danger); color: var(--paper-fixed); }
+.steps .step.current { background: var(--warning); color: var(--ink-fixed); }
+
+/* ==========================================================================
+   Status blocks — bordered block with a coloured left square
+   (sync line, owned-update summary, login status, hints that carry state)
+   ========================================================================== */
+.hint {
+  font-size: var(--fs-xs);
+  line-height: var(--lh-body);
+}
+/* The block itself. #owned-summary is an id because the poller addresses it,
+   so every state rule below has to match that specificity -- a bare
+   .owned-error would lose to it and the failure would stay marked blue. */
+.status-block, .status-error, #sync-line:not(:empty), #status-line, #owned-summary {
+  display: block;
+  padding: var(--sp-1) var(--sp-2);
+  border: var(--rule) solid var(--ink);
+  border-left-width: var(--sp-2);
+  border-left-color: var(--info);
+  max-width: 68ch;
+}
+/* The left square carries the state. */
+#owned-summary.owned-running,
+.owned-running { border-left-color: var(--warning); font-weight: var(--w-bold); }
+#owned-summary.owned-error,
+.owned-error, .status-error,
+#sync-section .sync-error { border-left-color: var(--danger); font-weight: var(--w-bold); }
+#owned-summary.owned-ok,
+#sync-section .sync-ok { border-left-color: var(--success); }
+
+/* ==========================================================================
+   Empty states — the circle / square / triangle trio, one uppercase sentence
+   The trio is three flat background layers on one pseudo-element: a red
+   circle, a blue square and a yellow triangle (a hard-stop diagonal).
+   ========================================================================== */
+.empty {
+  font-size: var(--fs-md);
+  font-weight: var(--w-bold);
+  text-transform: uppercase;
+  letter-spacing: var(--track-caps);
+  line-height: var(--lh-tight);
+  padding: var(--sp-3);
+  border: var(--rule) solid var(--ink);
+  max-width: none;
+}
+.empty::before {
+  content: "";
+  display: block;
+  /* three shapes, each --shape wide, separated by --sp-3 */
+  width: calc(var(--shape) * 3 + var(--sp-3) * 2);
+  height: var(--shape);
+  margin-bottom: var(--sp-2);
+  background-image:
+    radial-gradient(circle at calc(var(--shape) / 2) calc(var(--shape) / 2),
+                    var(--danger) 0 calc(var(--shape) / 2), transparent calc(var(--shape) / 2)),
+    linear-gradient(var(--info) 0 0),
+    linear-gradient(to bottom right, transparent 0 49.5%, var(--warning) 50% 100%);
+  background-size: var(--shape) var(--shape), var(--shape) var(--shape), var(--shape) var(--shape);
+  background-position:
+    0 0,
+    calc(var(--shape) + var(--sp-3)) 0,
+    calc(var(--shape) * 2 + var(--sp-3) * 2) 0;
+  background-repeat: no-repeat;
+}
+
+/* ==========================================================================
+   Role badge (mirror mode) — a flat block with a black outline
+   ========================================================================== */
+.role-badge {
+  display: inline-block;
+  vertical-align: middle;
+  margin-left: var(--sp-1);
+  padding: 0 var(--sp-1);
+  border: var(--rule) solid var(--ink);
+  border-radius: var(--radius);
+  font-size: var(--fs-xs);
+  font-weight: var(--w-bold);
+  text-transform: uppercase;
+  letter-spacing: var(--track-caps);
+}
 /* Colour-coded so the two instances are distinguishable at a glance, not just
    readable: the mirror is the one where writes are refused. */
-.role-badge.role-primary {
-  background: rgba(87, 199, 133, 0.18);
-  color: var(--good);
-  border: 1px solid rgba(87, 199, 133, 0.45);
-}
-.role-badge.role-secondary {
-  background: rgba(255, 180, 58, 0.18);
-  color: var(--accent);
-  border: 1px solid rgba(255, 180, 58, 0.45);
-}
+.role-badge.role-primary { background: var(--success); color: var(--paper-fixed); }
+.role-badge.role-secondary { background: var(--warning); color: var(--ink-fixed); }
 
 /* One rule instead of an {% if %} in all six tables that emit a .cb-col.
    Hiding it is not cosmetic: the POST behind it is answered 403 on a mirror,
    and the handler's failure path just silently un-ticks the box again. */
 .readonly .cb-col input { display: none; }
 
-#sync-section .sync-error { color: #b00; }
-#sync-section .sync-ok { color: #060; }
+/* ==========================================================================
+   Activity log (Settings tab) — a bordered block, monospaced so the
+   timestamps form a true column
+   ========================================================================== */
+.activity-log {
+  max-width: var(--panel-w);
+  max-height: var(--log-h);
+  overflow-y: auto;
+  margin: 0 0 var(--sp-2);
+  padding: var(--sp-1) var(--sp-2);
+  background: var(--paper);
+  border: var(--rule) solid var(--ink);
+  border-radius: var(--radius);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  line-height: var(--lh-body);
+}
+/* A flex row per line, so every message starts at the same column and a
+   wrapped message hangs under itself instead of under the timestamp. */
+.activity-log .log-line { display: flex; align-items: baseline; gap: var(--sp-1); }
+.activity-log .log-at,
+.activity-log .log-dash { flex: none; color: var(--info); user-select: none; }
+.activity-log .log-msg { flex: 1 1 auto; min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.activity-log .log-phase { font-weight: var(--w-bold); margin-top: var(--sp-1); }
+.activity-log .log-done { color: var(--success); font-weight: var(--w-bold); }
+.activity-log .log-error { color: var(--danger); font-weight: var(--w-bold); }
+
+/* ==========================================================================
+   BookBub description tooltips
+   The description was a native `title` attribute, whose font size the browser
+   controls and CSS cannot change. So the template renders a custom tooltip
+   (.tip[data-tip], shown via ::after on hover) whose text size the "Tooltip
+   size" dropdown sets with a tsize-* class.
+   ========================================================================== */
+.tip { position: relative; display: inline-block; cursor: help; }
+.tip::after {
+  content: attr(data-tip);
+  position: absolute;
+  bottom: 110%;
+  /* Anchored to the element's LEFT edge, extending rightward: a centred box
+     clipped off-screen for the left-anchored cover. Content-sized but capped
+     at a ~68-character measure that scales with the tooltip's font size, and
+     at 90vw so it never overflows the screen. */
+  left: 0;
+  width: max-content;
+  max-width: min(68ch, 90vw);
+  white-space: normal;
+  overflow-wrap: anywhere;
+  padding: var(--sp-1) var(--sp-2);
+  background: var(--ink);
+  color: var(--paper);
+  border: var(--rule) solid var(--ink);
+  border-radius: var(--radius);
+  line-height: var(--lh-body);
+  font-family: var(--font-sans);
+  z-index: 60;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--dur) var(--ease);
+}
+.tip:hover::after { opacity: 1; }
+.tip.tsize-small::after { font-size: var(--fs-xs); }
+.tip.tsize-normal::after { font-size: var(--fs-base); }
+.tip.tsize-large::after { font-size: var(--fs-md); }
+
+/* ==========================================================================
+   Login tab — the embedded noVNC frame
+   ========================================================================== */
+#login-controls { display: flex; flex-wrap: wrap; gap: var(--sp-2); }
+.vnc-frame {
+  width: 100%;
+  height: var(--vnc-h);
+  background: var(--ink-fixed);
+  border: var(--rule) solid var(--ink);
+  border-radius: var(--radius);
+}
+
+/* ==========================================================================
+   Motion — mechanical: shapes assemble from the edges, nothing bounces
+   ========================================================================== */
+@keyframes assemble-down { from { transform: translateY(-100%); } to { transform: none; } }
+@keyframes assemble-left { from { transform: translateX(calc(-1 * var(--sp-4))); opacity: 0; } to { transform: none; opacity: 1; } }
+
+header { animation: assemble-down var(--dur-assemble) var(--ease) both; }
+main > * { animation: assemble-left var(--dur-assemble) var(--ease) both; }
+main > *:nth-child(1) { animation-delay: 0ms; }
+main > *:nth-child(2) { animation-delay: 60ms; }
+main > *:nth-child(3) { animation-delay: 120ms; }
+main > *:nth-child(4) { animation-delay: 180ms; }
+main > *:nth-child(n+5) { animation-delay: 240ms; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 1ms !important;
+    animation-delay: 0ms !important;
+    transition-duration: 1ms !important;
+  }
+}
+
+/* ==========================================================================
+   Narrow screens: the grid collapses, the rules stay
+   ========================================================================== */
+@media (max-width: 720px) {   /* the one breakpoint; a media query cannot read a custom property */
+  :root { --fs-xl: 28px; --fs-lg: 20px; }
+  header { gap: var(--sp-2); }
+  main { padding: var(--sp-3) var(--sp-2) var(--sp-5); }
+  .summary .stat { min-width: 0; flex: 1 1 calc(var(--stat-w) - var(--sp-3)); }
+  /* An 8-column price table cannot fit a phone. Let the table scroll inside
+     its own bordered block instead of giving the whole page a sideways scroll.
+     This costs the BookBub tooltips their overflow at this width, which is
+     moot -- they are hover-only, so they never open on a touch screen. */
+  table { display: block; overflow-x: auto; }
+  table.covers-1x, table.covers-2x, table.covers-4x { overflow-x: auto; }
+  th, td { white-space: nowrap; }
+}

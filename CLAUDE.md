@@ -21,6 +21,7 @@ uvicorn app.main:app --reload --port 9060        # open http://localhost:9060/
 python scripts/_smoke.py                          # exit 0 = pass; uses a throwaway temp DB
 # It also runs a full mirror round-trip with no network: two SQLite files in one
 # process (it monkeypatches `app.db.DB_PATH`, which `connect()` reads per call).
+python scripts/_css_check.py                      # UI design-token discipline (see below)
 
 # Production deploy on Ubuntu (idempotent — re-run after every change):
 git pull && sudo bash scripts/install_systemd.sh # rsyncs to /opt/amazon-wishlist, refreshes venv, restarts unit
@@ -108,6 +109,43 @@ One bug this exposed and fixed: `_now()` writes naive server-**local** time, so 
 ### Read-side queries & price math
 
 The page views (`deals`, `all_books_by_price`, `no_price_books`, `price_drop_history`, `purchased_books`) all build off snapshots in `price_snapshot` (append-only). The shared `_LATEST_BASE` CTE pulls the latest snapshot per ASIN plus the previous price and the all-time high, joined to `book` and `wishlist_book` so only books **currently on a wishlist** appear (purchased books are the exception — they show regardless of membership). Drop math (`_row_to_book`) computes dollar/percent drop against a **basis**: `prev` (previous observed price) or `list` (Amazon's strikethrough/list price), selected per-request via the `basis` query param. Prices are stored as integer cents throughout; only format to dollars at the template boundary.
+
+### UI: the Bauhaus Geometric design system (`app/static/style.css`)
+
+One stylesheet, no build step, no framework. It opens with a `:root` token block
+-- palette, type scale, spacing, rule weights, geometry, motion -- and every rule
+below it is built only from those tokens. **Never hard-code a colour or a size in
+a component**; add or reuse a token. `scripts/_css_check.py` enforces exactly
+that (it fails on a hex/rgb literal or a raw px/rem outside `:root`), plus that
+every `var(--x)` resolves and every class a template emits has a rule.
+
+What the system is made of, and the three traps in it:
+
+- **Dark mode swaps `--paper` and `--ink` and nothing else** -- the primaries are
+  identical in both themes. So text sitting *on* a coloured block cannot use
+  `--ink`/`--paper`: it would invert with the theme and lose contrast. Those
+  cases use the pinned `--ink-fixed` / `--paper-fixed` pair (yellow always takes
+  ink text, red/blue/green always take paper text).
+- **`[hidden] { display: none !important }` near the top is load-bearing.** Any
+  `display` a component sets out-specifies the UA's `[hidden]` rule, so the
+  panels the templates start hidden (`#scrape-progress`, `#owned-progress`,
+  `#owned-log`, `#vnc-wrap`) would otherwise render on every page load.
+- **`#owned-summary` is an id**, because the poller addresses it, so the state
+  rules that colour its left square (`.owned-running` / `.owned-ok` /
+  `.owned-error`) are written as `#owned-summary.owned-error` to match that
+  specificity. A bare class there silently loses and every state looks like the
+  default blue.
+
+No gradients, shadows, tints or transparency: `opacity` is not how a state is
+expressed here. Disabled is "outlined and dashed", de-emphasis is a colour
+change, and the indeterminate progress bar is a hard-stop colour band (flat
+blocks) sliding along the track, not a fade. Lines are 2px minimum, with one
+deliberate exception noted in the Tables section: 1px row rules inside an
+already-bordered table read as grid lines rather than hairline decoration.
+
+The favicon in `base.html` is an inline SVG data URI, which cannot read a custom
+property -- it is the only place outside `:root` that names a colour, and the
+comment there says so. Change it together with `--red`/`--blue`.
 
 ## Conventions & gotchas
 

@@ -6,7 +6,9 @@
 {% if readonly %}
 {# Reachable by direct URL only — base.html drops the nav link on a mirror.
    A mirror never fetches from Amazon, so it has no session to manage. #}
-<p class="empty">
+{# A notice, not an empty list: it gets the bordered status block rather than
+   the uppercase circle/square/triangle empty state. #}
+<p class="status-block">
   This instance is a read-only <strong>mirror</strong>. It never fetches from Amazon,
   so there is no Amazon session to manage here — log in on the primary.
 </p>
@@ -15,7 +17,7 @@
 <section id="login-status">
   <p class="hint" id="status-line">Loading…</p>
   {% if status.error %}
-    <p class="hint" style="color: var(--bad)">{{ status.error }}</p>
+    <p class="hint status-error">{{ status.error }}</p>
   {% endif %}
 </section>
 
@@ -26,8 +28,7 @@
 </section>
 
 <section id="vnc-wrap" hidden>
-  <iframe id="vnc-frame" title="Amazon login (noVNC)"
-          style="width: 100%; height: 720px; border: 1px solid var(--border); border-radius: 6px; background: black;"></iframe>
+  <iframe id="vnc-frame" class="vnc-frame" title="Amazon login (noVNC)"></iframe>
   <p class="hint">
     Sign in to your <strong>secondary</strong> Amazon account in the embedded browser.
     Complete any 2FA / new-device verification. When the homepage loads, click

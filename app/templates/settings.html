@@ -33,6 +33,10 @@
 <section id="owned-section">
   <button id="owned-btn" class="primary" type="button">Update Owned Books</button>
   <div id="owned-progress" hidden>
+    {# Numbered circles on a rule, one per step, filled as the run banks them.
+       Built from step/total_steps by renderSteps() below -- the same two
+       numbers that drive the bar, so the two can never disagree. #}
+    <div id="owned-steps" class="steps" aria-hidden="true"></div>
     <progress id="owned-bar" value="0" max="1"></progress>
     <div id="owned-phase" class="hint"></div>
   </div>
@@ -75,6 +79,7 @@
   const bar = document.getElementById('owned-bar');
   const phase = document.getElementById('owned-phase');
   const logEl = document.getElementById('owned-log');
+  const stepsEl = document.getElementById('owned-steps');
   const summary = document.getElementById('owned-summary');
   let polling = false;
   let drawn = '';   // signature of the log currently on screen
@@ -86,6 +91,24 @@
     const m = Math.floor(s / 60);
     if (m < 60) return m + 'm ' + String(s % 60).padStart(2, '0') + 's';
     return Math.floor(m / 60) + 'h ' + String(m % 60).padStart(2, '0') + 'm';
+  }
+
+  // One circle per step: filled red once banked, yellow for the one in flight.
+  // Rebuilt only when the count or position changes, so it is not churning DOM
+  // once a second through a long library fetch.
+  let stepsDrawn = '';
+  function renderSteps(s) {
+    const total = s.total_steps || 0;
+    const sig = total + '/' + s.step + '/' + (s.running ? 'run' : 'idle');
+    if (sig === stepsDrawn) return;
+    stepsDrawn = sig;
+    stepsEl.textContent = '';
+    for (let i = 1; i <= total; i++) {
+      const dot = cell('step', String(i));
+      if (i <= s.step) dot.classList.add('done');
+      else if (s.running && i === s.step + 1) dot.classList.add('current');
+      stepsEl.appendChild(dot);
+    }
   }
 
   function cell(cls, text) {
@@ -123,6 +146,7 @@
 
   function render(s) {
     renderLog(s);
+    renderSteps(s);
     if (s.total_steps > 0) {
       bar.max = s.total_steps;
       bar.value = s.step;
@@ -159,7 +183,7 @@
         (r.grimmory_books || 0) + ' grimmory books, ' +
         (r.marked_purchased || 0) + ' marked purchased, ' +
         (r.deals_refreshed || 0) + ' deals refreshed.';
-      summary.className = 'hint';
+      summary.className = 'hint owned-ok';
     }
   }
 
