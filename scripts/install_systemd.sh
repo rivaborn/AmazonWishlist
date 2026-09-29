@@ -19,8 +19,8 @@ fi
 # Login-tab infrastructure: virtual X display, VNC, and the noVNC web client.
 # (Chromium's own runtime deps are installed by `playwright install --with-deps`
 #  below — that picks the right package set per Ubuntu version.)
-# Plus the wlvpn tunnel's hard deps: wireguard-tools (the `wg` tool) and curl
-# (the namespace egress check in scripts/vpn_netns_up.sh).
+# Plus the wlvpn tunnel's hard deps (VPNManager builds it, but on this box):
+# wireguard-tools (the `wg` tool) and curl (egress checks).
 DEBIAN_FRONTEND=noninteractive apt-get update
 DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
   xvfb x11vnc websockify novnc curl wireguard-tools
@@ -103,26 +103,30 @@ elif ! (curl -fsSL "$NORDVPN_RELEASE_DEB_URL" -o /tmp/nordvpn-release.deb       
   echo "WARNING: could not install the nordvpn CLI via $NORDVPN_RELEASE_DEB_URL" >&2
   echo "         (network block, or Nord moved the repo package). Install it by hand" >&2
   echo "         from https://nordvpn.com/download/linux/, run 'nordvpn login --token <TOKEN>'" >&2
-  echo "         as WISHLIST_VPN_USER, then 'systemctl restart amazon-wishlist-vpn.service'." >&2
+  echo "         as the VPNManager nord_user (sudo vpnmgr status)." >&2
 fi
 rm -f /tmp/nordvpn-release.deb
 
 # The client's postinst adds the *installing* box's login user to the nordvpn
-# group, which is not necessarily WISHLIST_VPN_USER — and vpn_netns_up.sh drives
-# the CLI as that user (`runuser -u "$NVUSER" -- nordvpn ...`), so ensure it is
+# group, which is not necessarily WISHLIST_VPN_USER — and VPNManager drives
+# the CLI as its configured nord_user (`runuser -u "$NVUSER" -- nordvpn ...`), so ensure it is
 # a member. Tolerated: no group means no tunnel, but the deploy still succeeds.
 if [ -n "${WISHLIST_VPN_USER:-}" ] && getent group nordvpn >/dev/null 2>&1; then
   usermod -aG nordvpn "$WISHLIST_VPN_USER" 2>/dev/null     || echo "note: could not add '$WISHLIST_VPN_USER' to the nordvpn group" >&2
 fi
 
 install -m 644 "$APP_DIR/amazon-wishlist.service" /etc/systemd/system/amazon-wishlist.service
-# The wlvpn tunnel unit: installed but NOT a boot-time unit (no [Install]
-# section) — it comes up on demand via the bookbub unit's Requires= and is
-# torn down by that unit's ExecStopPost, so the VPN is only connected while a
-# run is in use. It still needs `nordvpn login --token` done once by
-# WISHLIST_VPN_USER (see above); until then it cannot come up, and a bookbub
-# run then fails fast (Requires=) — which must never block a deploy.
-install -m 644 "$APP_DIR/amazon-wishlist-vpn.service" /etc/systemd/system/amazon-wishlist-vpn.service
+# The wlvpn tunnel belongs to VPNManager since 2026-09-29 (github.com/rivaborn/
+# VPNManager): lease `wishlist`, unit vpnmgr-tunnel@wishlist.service (on demand,
+# StopWhenUnneeded). This app no longer ships a tunnel unit or netns scripts. A
+# box without VPNManager (or without the lease) can still run the app; only the
+# daily in-netns re-verify cannot start there — warn, never fail the deploy.
+if command -v vpnmgr >/dev/null 2>&1 && vpnmgr env wishlist >/dev/null 2>&1; then
+  echo "VPNManager lease 'wishlist' present: $(vpnmgr env wishlist | tr '\n' ' ')"
+else
+  echo "WARNING: VPNManager (lease 'wishlist') is not installed on this box; the daily" >&2
+  echo "         re-verify (amazon-wishlist-verify.service) cannot get its tunnel here." >&2
+fi
 # BookBub daily updater (scripts/bookbub_daily.py): a oneshot that runs the
 # FETCH on the HOST (headful Chromium can't launch inside the netns) and then
 # triggers amazon-wishlist-verify.service for the in-netns re-check. It is NO
@@ -141,18 +145,19 @@ systemctl disable --now amazon-wishlist-bookbub.timer 2>/dev/null || true
 systemctl remove amazon-wishlist-bookbub.timer 2>/dev/null || true
 systemctl daemon-reload
 systemctl enable amazon-wishlist.service
-# The wlvpn tunnel is no longer a boot-time unit: disable it if a previous
-# install enabled it, and stop it if it is up right now (VPN down unless a run
-# is in use).
+# Retire the pre-VPNManager tunnel unit if a previous install left it: it drove
+# `nordvpn connect` outside VPNManager's lock and back-off.
 systemctl disable --now amazon-wishlist-vpn.service 2>/dev/null || true
 systemctl stop amazon-wishlist-vpn.service 2>/dev/null || true
+rm -f /etc/systemd/system/amazon-wishlist-vpn.service
+systemctl daemon-reload
 # Scoped sudoers rule (NOT blanket sudo — same pattern as the vpn_verify.sh
 # scoped rule): lets the app (the wishlist user) start the bookbub unit on
 # schedule, lets bookbub_daily start the netns verify unit for the re-check,
 # and lets those units' ExecStopPost tear the VPN down. visudo -cf validates
 # the rule; a malformed one aborts the deploy (set -e).
 cat > /etc/sudoers.d/amazon-wishlist <<'SUDOERS'
-wishlist ALL=(root) NOPASSWD: /usr/bin/systemctl start amazon-wishlist-bookbub.service, /usr/bin/systemctl stop amazon-wishlist-vpn.service, /usr/bin/systemctl start amazon-wishlist-verify.service
+wishlist ALL=(root) NOPASSWD: /usr/bin/systemctl start amazon-wishlist-bookbub.service, /usr/bin/systemctl stop vpnmgr-tunnel@wishlist.service, /usr/bin/systemctl start amazon-wishlist-verify.service
 SUDOERS
 chmod 0440 /etc/sudoers.d/amazon-wishlist
 visudo -cf /etc/sudoers.d/amazon-wishlist
@@ -160,7 +165,7 @@ systemctl restart amazon-wishlist.service
 systemctl status --no-pager amazon-wishlist.service || true
 # "inactive (dead)" for the tunnel unit here is the healthy state: it is only
 # active while the daily BookBub run is in progress.
-systemctl status --no-pager amazon-wishlist-vpn.service || true
+systemctl status --no-pager vpnmgr-tunnel@wishlist.service || true
 
 echo
 echo "Installed. Visit http://<host>:9060/"

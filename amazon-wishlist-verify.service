@@ -3,8 +3,10 @@
 # through NordVPN. The rest of the box (SSH, LAN, the wishlist scraper itself)
 # is unaffected.
 #
-# amazon-wishlist-vpn.service is the tunnel (up/down scripts, oneshot +
-# RemainAfterExit, owns the namespace). This unit places the verifier in that
+# The tunnel comes from VPNManager (github.com/rivaborn/VPNManager, since
+# 2026-09-29): lease `wishlist` = netns wlvpn / iface wlwg, unit
+# vpnmgr-tunnel@wishlist.service (on demand: StopWhenUnneeded, so it and its
+# NordVPN slot go away when nothing needs it). This unit places the verifier in that
 # namespace at start and binds the namespace's Nord DNS over /etc/resolv.conf
 # (systemd does not apply the /etc/netns convention itself). BindsTo= the
 # tunnel unit so the verifier stops too if the tunnel stops; Requires= brings
@@ -15,8 +17,8 @@
 # recurring ~180s teardown deadlock that marked every daily run failed).
 # Teardown is owned by the daily amazon-wishlist-bookbub.service ExecStopPost
 # (not itself bound to the tunnel, so its stop cannot deadlock); a standalone
-# run must be followed by an explicit, not-bound `sudo systemctl stop
-# amazon-wishlist-vpn.service`.
+# run is torn down by StopWhenUnneeded (or an explicit `sudo systemctl stop
+# vpnmgr-tunnel@wishlist.service`).
 #
 # This unit doubles as the daily re-verify step of the BookBub updater: the
 # daily fetch runs OUTSIDE the netns (headful Chromium cannot launch inside a
@@ -25,8 +27,11 @@
 # [Install]: one run per trigger, and it is never enabled at boot — only the
 # once-a-day scheduler/manual start triggers it, so a restart never runs it.
 #
-# The NordVPN session is already negotiated by amazon-wishlist-vpn.service as
-# WISHLIST_VPN_USER — this unit needs NO NordVPN credentials and stores none.
+# The NordVPN session is negotiated by VPNManager (which owns every host
+# `nordvpn connect` on the box) — this unit needs NO NordVPN credentials and stores
+# none. Rotation is the app's call: verify_deals asks `sudo -n vpnmgr rotate
+# wishlist --json` (scoped sudoers from VPNManager), which swaps the session IN
+# PLACE, so this already-running verifier continues on the new exit.
 # Per-host settings (DEALS_DB, VERIFY_*, WISHLIST_VPN_*) go in
 # /etc/default/amazon-wishlist; install_systemd.sh reinstalls this unit from
 # the repo on every deploy, so a hand-edit here is reverted. (If you override
@@ -40,9 +45,9 @@
 
 [Unit]
 Description=Amazon Wishlist live-deal verifier (via wlvpn VPN namespace)
-After=amazon-wishlist-vpn.service
-Requires=amazon-wishlist-vpn.service
-BindsTo=amazon-wishlist-vpn.service
+After=vpnmgr-tunnel@wishlist.service
+Requires=vpnmgr-tunnel@wishlist.service
+BindsTo=vpnmgr-tunnel@wishlist.service
 
 [Service]
 User=wishlist
@@ -64,7 +69,7 @@ ExecStart=/opt/amazon-wishlist/.venv/bin/python scripts/verify_deals.py --netns 
 # No ExecStopPost teardown here on purpose: this unit is BindsTo/Requires the
 # tunnel, so stopping the tunnel from its own stop-post circular-waits against
 # TimeoutStopSec (see header). The daily bookbub unit's ExecStopPost owns
-# teardown; a standalone run must stop the tunnel explicitly afterwards.
+# teardown; after a standalone run StopWhenUnneeded stops the tunnel unit.
 # No Restart= (one run per trigger — the app's once-a-day schedule is the
 # retry; a failure must die, not flap the tunnel on a restart loop). No
 # [Install] section: never enabled at boot.

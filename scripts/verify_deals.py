@@ -45,10 +45,10 @@ real DB is not mutated during review.
 Tunnel mode (Ubuntu deployment): pass ``--netns NS`` (``amazon-wishlist-verify.service``
 and ``scripts/vpn_verify.sh`` pass ``--netns wlvpn``) while running INSIDE the
 namespace. The host-CLI path (login/connect/rotate) is then unused and no
-NordVPN credentials are needed — the session was pre-negotiated by
-``amazon-wishlist-vpn.service`` as the operator user. Within the namespace the
-tunnel's exit IP is fixed for its life, so a per-N "rotation" is a best-effort
-rebuild (fresh IP when permitted; the fingerprint still rotates either way).
+NordVPN credentials are needed — the session is negotiated by VPNManager
+(lease ``wishlist``, ``vpnmgr-tunnel@wishlist.service``). A per-N "rotation" asks
+VPNManager for a fresh session, swapped in place so this process continues on the
+new exit (the fingerprint rotates either way).
 
 Usage (from repo root, VPN + credentials available):
     python scripts/verify_deals.py --check
@@ -213,9 +213,8 @@ def _ensure_tunnel(ns: str) -> tuple[bool, str | None]:
     rebuilt once (best-effort ``systemctl restart`` of the tunnel unit — needs
     root or a scoped sudoers rule); still dead after that is an environment
     prerequisite failure the caller reports and exits 1. The host nordvpn CLI
-    is not involved: the session was pre-negotiated by
-    amazon-wishlist-vpn.service as the operator user, so no credentials are
-    needed here.
+    is not involved: VPNManager negotiated the session (lease ``wishlist``),
+    so no credentials are needed here.
     """
     ip = nordvpn.tunnel_egress_ip()
     if ip:

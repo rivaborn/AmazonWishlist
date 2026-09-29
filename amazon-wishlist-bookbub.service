@@ -57,7 +57,9 @@ ExecStart=/usr/bin/xvfb-run -a /opt/amazon-wishlist/.venv/bin/python scripts/boo
 # while the daily cycle is running ("when not in use, the VPN should not be
 # connected"). ExecStopPost runs as the service user, hence the scoped sudoers
 # rule (install_systemd.sh provisions it).
-ExecStopPost=/usr/bin/sudo -n /usr/bin/systemctl stop amazon-wishlist-vpn.service
+# The tunnel is VPNManager's `wishlist` lease (vpnmgr-tunnel@wishlist.service, since
+# 2026-09-29); stopping its unit releases the lease and frees the NordVPN slot.
+ExecStopPost=/usr/bin/sudo -n /usr/bin/systemctl stop vpnmgr-tunnel@wishlist.service
 # One run per trigger, NO Restart=: the app's once-a-day schedule is the retry.
 # A failing run must die (and let the VPN down) instead of flapping the tunnel
 # on a 30 s restart loop all day.

@@ -337,25 +337,29 @@ NORDVPN_START_COUNTRY = os.environ.get(
     "NORDVPN_START_COUNTRY", NORDVPN_COUNTRIES[0] if NORDVPN_COUNTRIES else "United States"
 )
 # Books per exit IP / fingerprint pair before a NordVPN rotation (the
-# scripts/verify_deals.py --rotate-every default). DORMANT by default: the
-# tunnel's exit IP is fixed for its life, and the `wishlist` user has no
-# sudoers rule to `systemctl restart amazon-wishlist-vpn.service`, so rotation
-# never succeeds (it just logs "fingerprint-only rotation" every N books).
-# Defanged via a huge default; to actually rotate later, set it back to a real
-# N (e.g. 10) AND grant the restart in install_systemd.sh's scoped rule.
+# scripts/verify_deals.py --rotate-every default). Still DORMANT by default,
+# but since 2026-09-29 it WORKS when enabled: rotation is `sudo -n vpnmgr rotate
+# wishlist --json` (VPNManager's scoped sudoers grants the `wishlist` user exactly
+# that), which swaps the session in place so the running verifier continues on
+# the new exit. Keep N large: every rotation is one NordVPN connect, and ~15
+# connects in 20 min throttled the whole account on 2026-07-22 (VPNManager paces
+# connects 45 s apart and backs off on a throttle, so a small N now slows a run
+# rather than breaking the account).
 NORDVPN_ROTATE_EVERY = int(os.environ.get("NORDVPN_ROTATE_EVERY", "1000000"))
 
 # ---------- NordVPN netns tunnel (app/nordvpn.py "tunnel mode") ----------
 # The Ubuntu deployment puts the live-deal verifier INSIDE a network namespace
-# whose only route is a NordLynx (WireGuard) tunnel — scripts/vpn_netns_up.sh /
-# vpn_netns_down.sh + amazon-wishlist-vpn.service (see README). These knobs
-# must match the tunnel unit's /etc/default/amazon-wishlist values so
-# `verify_deals.py --netns <NS>` addresses the same namespace the unit builds.
-# No credentials here: the session is pre-negotiated by the tunnel unit as
-# WISHLIST_VPN_USER (the nordvpn CLI's operator user).
+# whose only route is a NordLynx (WireGuard) tunnel. Since 2026-09-29 the tunnel
+# belongs to VPNManager (github.com/rivaborn/VPNManager): lease `wishlist`
+# (/etc/vpnmanager/config.toml -> netns wlvpn / iface wlwg), unit
+# vpnmgr-tunnel@wishlist.service. These knobs must match that lease so
+# `verify_deals.py --netns <NS>` addresses the namespace VPNManager builds.
+# No credentials here: VPNManager negotiates the session.
 WISHLIST_VPN_NS = os.environ.get("WISHLIST_VPN_NS", "wlvpn")
 WISHLIST_VPN_IFACE = os.environ.get("WISHLIST_VPN_IFACE", "wlwg")
-WISHLIST_VPN_UNIT = os.environ.get("WISHLIST_VPN_UNIT", "amazon-wishlist-vpn.service")
+WISHLIST_VPN_LEASE = os.environ.get("WISHLIST_VPN_LEASE", "wishlist")
+WISHLIST_VPN_UNIT = os.environ.get("WISHLIST_VPN_UNIT", "vpnmgr-tunnel@wishlist.service")
+VPNMGR = os.environ.get("VPNMGR", "/usr/local/bin/vpnmgr")
 # Where the egress checks point (must be reachable through the tunnel's DNS).
 WISHLIST_VPN_ENDPOINT = os.environ.get(
     "WISHLIST_VPN_ENDPOINT", "https://api.ipify.org"

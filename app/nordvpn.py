@@ -26,9 +26,10 @@ per-N-books invocation live in the orchestrator, not here.
 There is a second, "tunnel mode" section (``netns_exists`` / ``tunnel_egress_ip``
 / ``netns_egress_ok`` / ``rebuild_tunnel`` / ``tunnel_rotate``) for the Ubuntu
 deployment, where the verifier runs INSIDE a network namespace whose only
-route is a NordLynx (WireGuard) tunnel (scripts/vpn_netns_up.sh +
-amazon-wishlist-vpn.service). That path needs no CLI or credentials and never
-raises — a missing tool is a clean False/None the caller logs.
+route is a NordLynx (WireGuard) tunnel owned by VPNManager (lease ``wishlist``,
+vpnmgr-tunnel@wishlist.service; github.com/rivaborn/VPNManager). That path needs
+no CLI or credentials and never raises — a missing tool is a clean False/None
+the caller logs.
 """
 
 from __future__ import annotations
@@ -45,9 +46,10 @@ from .config import (
     NORDVPN_CITIES,
     NORDVPN_CLI,
     NORDVPN_COUNTRIES,
+    VPNMGR,
     WISHLIST_VPN_ENDPOINT,
+    WISHLIST_VPN_LEASE,
     WISHLIST_VPN_NS,
-    WISHLIST_VPN_UNIT,
 )
 
 __all__ = [
@@ -245,8 +247,8 @@ def rotate() -> str:
 
 # ---------- Tunnel mode (netns-based) ----------------------------------------
 # On Ubuntu the live-deal verifier runs INSIDE a network namespace whose only
-# route is a NordLynx (WireGuard) tunnel (scripts/vpn_netns_up.sh +
-# amazon-wishlist-vpn.service). Inside that namespace there is no host CLI to
+# route is a NordLynx (WireGuard) tunnel (VPNManager lease `wishlist`,
+# vpnmgr-tunnel@wishlist.service). Inside that namespace there is no host CLI to
 # drive, and the tunnel's egress IP is fixed for the tunnel's life — so this
 # section is the netns analogue of the host-CLI wrapper above:
 #
@@ -254,9 +256,10 @@ def rotate() -> str:
 #   tunnel_egress_ip  the egress IPv4 of the CALLING process (a plain curl;
 #                     for a process inside the namespace that IS the tunnel IP)
 #   netns_egress_ok   does `ip netns exec <ns> curl` get an answer (tunnel live)?
-#   rebuild_tunnel    best-effort `systemctl restart <unit>` (fresh session +
-#                     fresh exit IP; the up script proves egress before it
-#                     exits 0, and a Type=oneshot restart is synchronous)
+#   rebuild_tunnel    `sudo -n vpnmgr rotate wishlist --json`: a fresh session
+#                     and exit IP from VPNManager, swapped in place (or the
+#                     tunnel rebuilt when it is down); VPNManager verifies
+#                     egress before it exits 0
 #   tunnel_rotate     rebuild_tunnel() then tunnel_egress_ip() — the netns
 #                     analogue of the host CLI rotate()
 #
@@ -264,9 +267,10 @@ def rotate() -> str:
 # clean failure (False/None) that the caller logs, never an exception — the
 # orchestrator decides what "best effort" means. No credential handling here:
 # the session is pre-negotiated by the tunnel unit as the operator's user.
-# NOTE (recorded): a process already inside the namespace keeps its (old)
-# namespace until it is restarted — a rebuild re-creates the namespace for
-# NEWLY-launched consumers, so tunnel_rotate() is a best-effort IP refresh.
+# NOTE: until 2026-09-29 a rebuild re-created the namespace, so a process already
+# inside kept the old one and tunnel_rotate() was only a best-effort refresh.
+# VPNManager rotates IN PLACE (same namespace, new WireGuard session), so the
+# running verifier now continues on the new exit; open connections reset.
 
 # Seconds for the egress curls (the endpoint is a tiny response; the ceiling is
 # mostly the tunnel's worst-case first-packet latency).
@@ -347,7 +351,7 @@ def netns_egress_ok(ns: str | None = None, timeout: float | None = None) -> bool
 
     Requires root (``ip netns exec`` needs CAP_NET_ADMIN) or a scoped sudoers
     rule; a missing ``ip`` is a clean ``False``. rc 0 AND a non-empty body —
-    the same bar scripts/vpn_netns_up.sh uses to prove egress.
+    the same bar VPNManager uses to prove egress.
     """
     name = ns or WISHLIST_VPN_NS
     t = float(timeout) if timeout else _TUNNEL_TIMEOUT_SEC
@@ -361,33 +365,38 @@ def netns_egress_ok(ns: str | None = None, timeout: float | None = None) -> bool
     return True
 
 
-def rebuild_tunnel(unit: str | None = None, timeout: float = 180.0) -> bool:
-    """Best-effort ``systemctl restart <unit>`` — True when the tunnel (re)came up.
+def rebuild_tunnel(lease: str | None = None, timeout: float = 900.0) -> bool:
+    """Ask VPNManager for a fresh session on this app's lease — True when the
+    tunnel is up with verified egress afterwards.
 
-    The tunnel unit is Type=oneshot (RemainAfterExit), so a successful restart
-    returns only after ExecStart (vpn_netns_up.sh) has finished — which itself
-    verifies egress before exiting 0. Needs root; a non-root/failed restart is
-    a clean ``False`` for the caller to log, never an exception.
+    ``sudo -n vpnmgr rotate <lease> --json``: swaps the session IN PLACE when the
+    tunnel is up (the calling verifier stays attached), or rebuilds it when it is
+    down. VPNManager's scoped sudoers grants the ``wishlist`` user exactly this
+    command. Exit 5/6 mean NordVPN is throttling / at the account's connection cap
+    — VPNManager refused locally instead of retrying into it — and are logged as
+    such. Never raises: any failure is a clean ``False`` for the caller to log.
     """
-    name = unit or WISHLIST_VPN_UNIT
-    rc, out = _run_cmd(["systemctl", "restart", name], timeout=timeout)
+    name = lease or WISHLIST_VPN_LEASE
+    rc, out = _run_cmd(["sudo", "-n", VPNMGR, "rotate", name, "--json"], timeout=timeout)
     if rc != 0:
-        log.warning("rebuild_tunnel: systemctl restart %s failed (rc=%s): %s", name, rc, out.strip()[:200])
+        why = {4: "session budget exhausted", 5: "NordVPN back-off (throttled)",
+               6: "NordVPN connection cap"}.get(rc, "failed")  # fmt: skip
+        log.warning("rebuild_tunnel: vpnmgr rotate %s %s (rc=%s): %s", name, why, rc, out.strip()[:200])
         return False
     return True
 
 
-def tunnel_rotate(ns: str | None = None, unit: str | None = None) -> str | None:
-    """Refresh the tunnel's exit IP: rebuild the tunnel, return the egress IP.
+def tunnel_rotate(ns: str | None = None, lease: str | None = None) -> str | None:
+    """Refresh the tunnel's exit IP: rotate the lease, return the egress IP.
 
-    The netns analogue of the host-CLI :func:`rotate`: a rebuilt tunnel
-    negotiates a fresh WireGuard session (fresh assigned address / exit IP).
-    Returns ``None`` when the rebuild fails or the egress IP is unreadable —
-    the caller (scripts/verify_deals.py) treats that as "continue on the
-    current IP" rather than an error. See the section note above about
-    processes already inside the namespace keeping their old one.
+    The netns analogue of the host-CLI :func:`rotate`: VPNManager negotiates a
+    fresh WireGuard session (fresh exit IP) and swaps it into the existing
+    namespace, so this process continues on the new exit. Returns ``None`` when
+    the rotation fails or the egress IP is unreadable — the caller
+    (scripts/verify_deals.py) treats that as "continue on the current IP" rather
+    than an error.
     """
-    if not rebuild_tunnel(unit):
+    if not rebuild_tunnel(lease):
         return None
     new_ip = tunnel_egress_ip()
     if not new_ip:
