@@ -1,6 +1,7 @@
 {% extends "base.html" %}
 {% block title %}BookBub Deals{% endblock %}
 {% block content %}
+{% from "_sort_header.html" import th with context %}
 <h2>BookBub Deals</h2>
 <p class="hint">BookBub deals verified live on Amazon right now. Expired, unverified, and hidden deals are not shown. Hiding applies to the <em>book</em>, so it also covers the same book the next time BookBub features it.
   <label class="show-hidden">
@@ -57,22 +58,20 @@
   <p class="empty">No current BookBub deals. Verify the deals in data/deals.db (scripts/verify_deals.py) and try again.</p>
 {% else %}
 {% with pager=pagination %}{% include "_pagination.html" %}{% endwith %}
-{# Clickable sort headers: clicking the active column toggles its direction;
-   clicking the other switches to it with its default (price ascending =
-   cheapest first, date descending = most recent first). Arrows show the
-   current sort state on the active column. #}
-{% set price_next = 'desc' if (sort == 'price' and dir == 'asc') else 'asc' %}
-{% set date_next = 'asc' if (sort == 'date' and dir == 'desc') else 'desc' %}
+{# Clickable sort headers, built from the shared `sort_links` map so every
+   column sorts (not just price/date): click a column to sort by it, click the
+   active column to flip asc/desc. Arrows mark the active sort. #}
 <table class="covers-{{ cover_size }}">
   <thead>
     <tr>
       <th class="cover-col"></th>
       <th class="cb-col"></th>
-      <th>Title</th><th>Author</th>
-      <th><a href="/bookbub-deals?sort=price&dir={{ price_next }}&amp;min_stars={{ min_stars }}" class="{{ 'sort-active' if sort == 'price' }}">Deal price{% if sort == 'price' %} {{ '▲' if dir == 'asc' else '▼' }}{% endif %}</a></th>
-      <th>Regular price</th>
-      <th><a href="/bookbub-deals?sort=date&dir={{ date_next }}&amp;min_stars={{ min_stars }}" class="{{ 'sort-active' if sort == 'date' }}">Date of Deal{% if sort == 'date' %} {{ '▲' if dir == 'asc' else '▼' }}{% endif %}</a></th>
-      <th>Stars</th>
+      {{ th('title', 'Title', sort, dir, sort_links) }}
+      {{ th('author', 'Author', sort, dir, sort_links) }}
+      {{ th('price', 'Deal price', sort, dir, sort_links) }}
+      {{ th('original', 'Regular price', sort, dir, sort_links) }}
+      {{ th('date', 'Date of Deal', sort, dir, sort_links) }}
+      {{ th('stars', 'Stars', sort, dir, sort_links) }}
     </tr>
   </thead>
   <tbody>

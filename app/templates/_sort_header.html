@@ -1,0 +1,10 @@
+{# Clickable sort header for the deal/book listing tables (imported with
+   `with context` so it sees `sort`, `dir`, and `sort_links`).
+   `col` is the column key (must be in the page's sort_links), `label` the
+   visible heading. On the active column it shows ▲ (asc) / ▼ (desc) and
+   carries the `sort-active` class; clicking a different column switches to
+   it with that column's default direction. The `cb-col` / empty columns are
+   left as plain `<th>` and are deliberately not sortable. #}
+{% macro th(col, label, sort, dir, sort_links) %}
+<th><a href="{{ sort_links[col] }}" class="{{ 'sort-active' if sort == col }}">{{ label }}{% if sort == col %} {{ '▲' if dir == 'asc' else '▼' }}{% endif %}</a></th>
+{% endmacro %}

@@ -1,6 +1,7 @@
 {% extends "base.html" %}
 {% block title %}Purchased{% endblock %}
 {% block content %}
+{% from "_sort_header.html" import th with context %}
 <h2>Purchased books</h2>
 <p class="hint">These books are hidden from Deals, All Books, No Price, and Price Drops. Untick to put a book back into rotation.</p>
 
@@ -12,7 +13,11 @@
   <thead>
     <tr>
       <th class="cb-col"></th>
-      <th>Title</th><th>Author</th><th>Last price</th><th>List</th><th>Last seen</th>
+      {{ th('title', 'Title', sort, dir, sort_links) }}
+      {{ th('author', 'Author', sort, dir, sort_links) }}
+      {{ th('price', 'Last price', sort, dir, sort_links) }}
+      {{ th('list', 'List', sort, dir, sort_links) }}
+      {{ th('seen', 'Last seen', sort, dir, sort_links) }}
     </tr>
   </thead>
   <tbody>

@@ -1,6 +1,7 @@
 {% extends "base.html" %}
 {% block title %}Price Drops{% endblock %}
 {% block content %}
+{% from "_sort_header.html" import th with context %}
 <h2>Price drop history</h2>
 {% include "_filters.html" %}
 
@@ -12,9 +13,13 @@
   <thead>
     <tr>
       <th class="cb-col"></th>
-      <th>Title</th><th>Author</th><th>Now</th>
-      <th>{{ 'Prev' if basis == 'prev' else 'List' }}</th>
-      <th>Drop $</th><th>Drop %</th><th>When</th>
+      {{ th('title', 'Title', sort, dir, sort_links) }}
+      {{ th('author', 'Author', sort, dir, sort_links) }}
+      {{ th('price', 'Now', sort, dir, sort_links) }}
+      {{ th('base', 'Prev' if basis == 'prev' else 'List', sort, dir, sort_links) }}
+      {{ th('drop_dollar', 'Drop $', sort, dir, sort_links) }}
+      {{ th('drop_pct', 'Drop %', sort, dir, sort_links) }}
+      {{ th('seen', 'When', sort, dir, sort_links) }}
     </tr>
   </thead>
   <tbody>

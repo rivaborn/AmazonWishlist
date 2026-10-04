@@ -863,3 +863,45 @@ def set_book_purchased(asin: str, purchased: bool) -> bool:
         if cur.rowcount == 0:
             raise KeyError(f"unknown asin: {asin}")
     return purchased
+
+
+# ---------- clickable sort headings (deals / books / no-price / drops / purchased) ----------
+
+# Column -> value getter for a BookRow. ``basis`` is only used by the "base"
+# column (the Prev/List-basis column the deals pages render), which must sort
+# by whichever price the page is currently showing.
+_SORT_GETTERS = {
+    "title": lambda r, basis: (r.title or "").lower(),
+    "author": lambda r, basis: (r.author or "").lower(),
+    "price": lambda r, basis: r.current_price_cents,
+    "list": lambda r, basis: r.list_price_cents,
+    "highest": lambda r, basis: r.highest_price_cents,
+    "base": lambda r, basis: (r.prev_price_cents if basis == "prev" else r.list_price_cents),
+    "drop_dollar": lambda r, basis: r.drop_dollar,
+    "drop_pct": lambda r, basis: r.drop_pct,
+    "seen": lambda r, basis: r.observed_at,
+}
+
+
+def sort_book_rows(rows, column, direction, basis: Basis = "prev"):
+    """Return a NEW list of ``rows`` ordered by ``column``.
+
+    ``column`` must be a key of :data:`_SORT_GETTERS` (anything else is
+    ignored and the input order is kept). ``direction`` is ``"asc"`` or
+    ``"desc"``. Rows whose sort value is None (e.g. a book with no recorded
+    price for a price column) are always placed last, regardless of direction,
+    so a negative-looking blank never floats to the top of a descending sort.
+    Returns a new list; the caller's list is never mutated.
+    """
+    getter = _SORT_GETTERS.get(column)
+    if getter is None:
+        return list(rows)
+    direction = "desc" if direction == "desc" else "asc"
+
+    def key(r):
+        return getter(r, basis)
+
+    valued = [r for r in rows if key(r) is not None]
+    blanks = [r for r in rows if key(r) is None]
+    valued.sort(key=key, reverse=(direction == "desc"))
+    return valued + blanks

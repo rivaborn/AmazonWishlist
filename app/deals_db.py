@@ -845,6 +845,7 @@ def current_deals(
                 "deal_price": deal_price,
                 "deal_price_cents": parse_price_cents(deal_price),
                 "original_price": original_price,
+                "original_price_cents": parse_price_cents(original_price),
                 "amazon_url": amazon_url,
                 "hidden": hidden,
                 "cover": cover,
@@ -891,20 +892,30 @@ def set_hidden(conn: sqlite3.Connection, row_id: int, hidden: bool) -> bool:
 def sort_deals(rows: list[dict], sort: str = "date", direction: str = "desc") -> list[dict]:
     """Return a NEW list of ``current_deals`` dicts ordered for the web tab.
 
-    ``sort`` is ``"date"`` (the ``YYYY-MM-DD`` ``date`` string, lexicographic =
-    chronological) or ``"price"`` (the numeric ``deal_price_cents``). ``direction``
-    is ``"asc"`` or ``"desc"``. For ``price`` sorting, rows whose
-    ``deal_price_cents`` is None (an unparseable deal price) are always placed
+    ``sort`` is one of ``"date"`` (the ``YYYY-MM-DD`` ``date`` string,
+    lexicographic = chronological), ``"price"`` (numeric ``deal_price_cents``),
+    ``"original"`` (numeric ``original_price_cents``), ``"stars"`` (numeric
+    rating), ``"title"`` or ``"author"`` (string, case-insensitive).
+    ``direction`` is ``"asc"`` or ``"desc"``. For columns whose value can be
+    None (``price``/``original``/``stars``) the blank rows are always placed
     last, regardless of direction. A new list is returned; the caller's list
     and its dicts are never mutated. Unknown ``sort`` values fall back to
     ``date``.
     """
     ordered = list(rows)  # shallow copy — reorder, never touch the input order
-    if sort == "price":
-        with_cents = [r for r in ordered if r.get("deal_price_cents") is not None]
-        no_cents = [r for r in ordered if r.get("deal_price_cents") is None]
-        with_cents.sort(key=lambda r: r["deal_price_cents"], reverse=(direction == "desc"))
-        return with_cents + no_cents
+    direction = "desc" if direction == "desc" else "asc"
+    if sort == "title":
+        ordered.sort(key=lambda r: (r.get("title") or "").lower(), reverse=(direction == "desc"))
+        return ordered
+    if sort == "author":
+        ordered.sort(key=lambda r: (r.get("author") or "").lower(), reverse=(direction == "desc"))
+        return ordered
+    if sort in ("price", "original", "stars"):
+        col = {"price": "deal_price_cents", "original": "original_price_cents", "stars": "stars"}[sort]
+        with_val = [r for r in ordered if r.get(col) is not None]
+        no_val = [r for r in ordered if r.get(col) is None]
+        with_val.sort(key=lambda r: r[col], reverse=(direction == "desc"))
+        return with_val + no_val
     # sort == "date" (default fallback)
     ordered.sort(key=lambda r: (r.get("date") or ""), reverse=(direction == "desc"))
     return ordered

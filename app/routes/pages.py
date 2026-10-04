@@ -1,6 +1,7 @@
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlencode
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import FileResponse, RedirectResponse
@@ -35,14 +36,6 @@ def _basis(value: str) -> str:
     return "list" if value == "list" else "prev"
 
 
-def _bookbub_sort(value: str) -> str:
-    return "price" if value == "price" else "date"
-
-
-def _bookbub_dir(value: str) -> str:
-    return "asc" if value == "asc" else "desc"
-
-
 def _bookbub_per_page(value: int) -> int:
     """Snap an incoming per_page to the nearest allowed BookBub option.
 
@@ -64,6 +57,72 @@ def _per_page(value: int) -> int:
     return max(PER_PAGE_MIN, min(PER_PAGE_MAX, value))
 
 
+# ---------- clickable sort headings ----------
+
+# Each page lists the columns it makes sortable as {column: default direction}.
+# The first entry is that page's default sort; ``_sort_dir`` falls back to it
+# (with its default direction) when the incoming sort/dir is invalid. Clicking
+# the active column toggles dir; clicking another column switches to it with its
+# default direction.
+DEALS_SORT_DEFAULTS = {
+    "drop_pct": "desc", "drop_dollar": "desc", "price": "asc",
+    "base": "asc", "highest": "asc", "title": "asc", "author": "asc",
+    "seen": "desc",
+}
+DROPS_SORT_DEFAULTS = {
+    "seen": "desc", "drop_pct": "desc", "drop_dollar": "desc",
+    "price": "asc", "base": "asc", "title": "asc", "author": "asc",
+}
+BOOKS_SORT_DEFAULTS = {
+    "price": "asc", "title": "asc", "author": "asc", "list": "asc",
+    "highest": "asc", "seen": "desc",
+}
+PURCHASED_SORT_DEFAULTS = {
+    "seen": "desc", "title": "asc", "author": "asc", "price": "asc",
+    "list": "asc",
+}
+NOPRICE_SORT_DEFAULTS = {
+    "title": "asc", "author": "asc", "seen": "desc",
+}
+# BookBub Deals tab: all its columns sortable, not just price/date.
+BOOKBUB_SORT_DEFAULTS = {
+    "date": "desc", "title": "asc", "author": "asc", "price": "asc",
+    "original": "asc", "stars": "desc",
+}
+
+
+def _sort_dir(sort: str, direction: str, defaults: dict) -> tuple[str, str]:
+    """Normalise an incoming sort/dir against a page's allowed columns.
+
+    An unknown sort falls back to the page default (the first key of
+    ``defaults``); an unknown direction falls back to that column's default.
+    """
+    if sort not in defaults:
+        sort = next(iter(defaults))
+    if direction not in ("asc", "desc"):
+        direction = defaults[sort]
+    return sort, direction
+
+
+def _sort_context(base_url: str, extra: dict, sort: str, direction: str, defaults: dict) -> dict:
+    """Build the {column: href} map the templates use for clickable headers.
+
+    Every header links to ``{base_url}?sort=<col>&dir=<next><extra>``, where
+    ``<next>`` toggles the current direction when ``<col>`` is the active sort
+    and otherwise is that column's default. ``extra`` carries the non-sort
+    query params (filters, per_page) so a sort keeps them. No page param is
+    included, so sorting always starts back at page 1.
+    """
+    links: dict[str, str] = {}
+    for col, default_dir in defaults.items():
+        next_dir = ("desc" if direction == "asc" else "asc") if sort == col else default_dir
+        q = dict(extra)
+        q["sort"] = col
+        q["dir"] = next_dir
+        links[col] = f"{base_url}?{urlencode(q)}"
+    return {"sort": sort, "dir": direction, "sort_links": links}
+
+
 @router.get("/")
 def index() -> RedirectResponse:
     return RedirectResponse(url="/deals")
@@ -75,18 +134,25 @@ def deals_page(
     min_dollar: float = 0.0,
     min_pct: float = 0.0,
     basis: str = "prev",
+    sort: str = "drop_pct",
+    dir: str = "desc",
     page: int = Query(1, ge=1),
     per_page: int = Query(DEFAULT_PER_PAGE),
 ):
     b = _basis(basis)
     rows = services.deals(min_dollar, min_pct, b)  # type: ignore[arg-type]
+    s, d = _sort_dir(sort, dir, DEALS_SORT_DEFAULTS)
+    rows = services.sort_book_rows(rows, s, d, b)
+    extra = {"min_dollar": min_dollar, "min_pct": min_pct, "basis": b,
+             "per_page": _per_page(per_page)}
     pagination = paginate(
         rows,
         page=page,
         per_page=_per_page(per_page),
         base_url="/deals",
-        extra_query={"min_dollar": min_dollar, "min_pct": min_pct, "basis": b},
+        extra_query=extra,
     )
+    sc = _sort_context("/deals", extra, s, d, DEALS_SORT_DEFAULTS)
     return templates.TemplateResponse(
         request,
         "deals.html",
@@ -96,6 +162,9 @@ def deals_page(
             "min_dollar": min_dollar,
             "min_pct": min_pct,
             "basis": b,
+            "sort": sc["sort"],
+            "dir": sc["dir"],
+            "sort_links": sc["sort_links"],
             "active": "deals",
         }),
     )
@@ -117,9 +186,11 @@ def bookbub_deals_page(
     mirror the DB (plus its cover images) is mirrored from the primary by the
     daily sync (GET /api/sync/deals), so the tab duplicates the primary's
     page. The tab shows only verified live deals (expired/unknown/unchecked
-    rows are filtered in the query, see deals_db.current_deals). Sortable by
-    Deal price or Date of deal via `?sort=price|date` + `?dir=asc|desc` (both
-    whitelisted, default date-desc = most recent first); sorting the full list
+    rows are filtered in the query, see deals_db.current_deals). Every column
+    is a clickable sort heading via `?sort=title|author|price|original|date|stars`
+    + `?dir=asc|desc` (all whitelisted, default date-desc = most recent first);
+    clicking the active heading toggles its direction, and the other headings
+    switch to it with its own default. Sorting the full list
     before pagination keeps every page consistently ordered and the
     extra_query carries the active sort into every page link.
     `?show_hidden=1` also reveals rows the user has hidden (hidden rows are
@@ -136,8 +207,7 @@ def bookbub_deals_page(
     (Settings tab / the per-page cover-size dropdown, default
     BOOKBUB_COVER_SIZE_DEFAULT) and is applied as a `size-*` class.
     """
-    s = _bookbub_sort(sort)
-    d = _bookbub_dir(direction)
+    s, d = _sort_dir(sort, direction, BOOKBUB_SORT_DEFAULTS)
     pp = _bookbub_per_page(per_page)
     ms = _bookbub_min_stars(min_stars)
     cover_size = settings.get("cover_size", config.BOOKBUB_COVER_SIZE_DEFAULT)
@@ -151,14 +221,15 @@ def bookbub_deals_page(
         )
     finally:
         conn.close()
+    extra = {"show_hidden": show_hidden, "per_page": pp, "min_stars": ms}
     pagination = paginate(
         rows,
         page=page,
         per_page=pp,
         base_url="/bookbub-deals",
-        extra_query={"sort": s, "dir": d, "show_hidden": show_hidden,
-                     "per_page": pp, "min_stars": ms},
+        extra_query={**extra, "sort": s, "dir": d},
     )
+    sc = _sort_context("/bookbub-deals", extra, s, d, BOOKBUB_SORT_DEFAULTS)
     return templates.TemplateResponse(
         request,
         "bookbub_deals.html",
@@ -166,8 +237,9 @@ def bookbub_deals_page(
             {
                 "rows": pagination["rows"],
                 "pagination": pagination,
-                "sort": s,
-                "dir": d,
+                "sort": sc["sort"],
+                "dir": sc["dir"],
+                "sort_links": sc["sort_links"],
                 "show_hidden": show_hidden,
                 "per_page": pp,
                 "per_page_options": config.BOOKBUB_PER_PAGE_OPTIONS,
@@ -247,13 +319,20 @@ def settings_page(request: Request):
 @router.get("/books")
 def books_page(
     request: Request,
+    sort: str = "price",
+    dir: str = "asc",
     page: int = Query(1, ge=1),
     per_page: int = Query(DEFAULT_PER_PAGE),
 ):
     rows, summary = services.all_books_by_price()
+    s, d = _sort_dir(sort, dir, BOOKS_SORT_DEFAULTS)
+    rows = services.sort_book_rows(rows, s, d)
+    extra = {"per_page": _per_page(per_page)}
     pagination = paginate(
-        rows, page=page, per_page=_per_page(per_page), base_url="/books"
+        rows, page=page, per_page=_per_page(per_page), base_url="/books",
+        extra_query=extra,
     )
+    sc = _sort_context("/books", extra, s, d, BOOKS_SORT_DEFAULTS)
     return templates.TemplateResponse(
         request,
         "books.html",
@@ -261,6 +340,9 @@ def books_page(
             "rows": pagination["rows"],
             "summary": summary,
             "pagination": pagination,
+            "sort": sc["sort"],
+            "dir": sc["dir"],
+            "sort_links": sc["sort_links"],
             "active": "books",
         }),
     )
@@ -269,26 +351,32 @@ def books_page(
 @router.get("/no-price")
 def no_price_page(
     request: Request,
+    sort: str = "title",
+    dir: str = "asc",
     kindle_page: int = Query(1, ge=1),
     p404_page: int = Query(1, ge=1),
     per_page: int = Query(DEFAULT_PER_PAGE),
 ):
     groups = services.no_price_books()
+    s, d = _sort_dir(sort, dir, NOPRICE_SORT_DEFAULTS)
     pp = _per_page(per_page)
+    sc = _sort_context("/no-price", {"per_page": pp}, s, d, NOPRICE_SORT_DEFAULTS)
+    kindle = services.sort_book_rows(groups.get("kindle_unavailable", []), s, d)
+    p404 = services.sort_book_rows(groups.get("page_404", []), s, d)
     kindle_pagination = paginate(
-        groups.get("kindle_unavailable", []),
+        kindle,
         page=kindle_page,
         per_page=pp,
         base_url="/no-price",
-        extra_query={"p404_page": p404_page},
+        extra_query={"p404_page": p404_page, "per_page": pp, "sort": s, "dir": d},
         page_param="kindle_page",
     )
     p404_pagination = paginate(
-        groups.get("page_404", []),
+        p404,
         page=p404_page,
         per_page=pp,
         base_url="/no-price",
-        extra_query={"kindle_page": kindle_page},
+        extra_query={"kindle_page": kindle_page, "per_page": pp, "sort": s, "dir": d},
         page_param="p404_page",
     )
     return templates.TemplateResponse(
@@ -299,6 +387,9 @@ def no_price_page(
             "kindle_pagination": kindle_pagination,
             "page_404": p404_pagination["rows"],
             "p404_pagination": p404_pagination,
+            "sort": sc["sort"],
+            "dir": sc["dir"],
+            "sort_links": sc["sort_links"],
             "active": "no_price",
         }),
     )
@@ -310,18 +401,25 @@ def price_drops_page(
     min_dollar: float = 0.0,
     min_pct: float = 0.0,
     basis: str = "prev",
+    sort: str = "seen",
+    dir: str = "desc",
     page: int = Query(1, ge=1),
     per_page: int = Query(DEFAULT_PER_PAGE),
 ):
     b = _basis(basis)
     rows = services.price_drop_history(min_dollar, min_pct, b)  # type: ignore[arg-type]
+    s, d = _sort_dir(sort, dir, DROPS_SORT_DEFAULTS)
+    rows = services.sort_book_rows(rows, s, d, b)
+    extra = {"min_dollar": min_dollar, "min_pct": min_pct, "basis": b,
+             "per_page": _per_page(per_page)}
     pagination = paginate(
         rows,
         page=page,
         per_page=_per_page(per_page),
         base_url="/price-drops",
-        extra_query={"min_dollar": min_dollar, "min_pct": min_pct, "basis": b},
+        extra_query=extra,
     )
+    sc = _sort_context("/price-drops", extra, s, d, DROPS_SORT_DEFAULTS)
     return templates.TemplateResponse(
         request,
         "price_drops.html",
@@ -331,6 +429,9 @@ def price_drops_page(
             "min_dollar": min_dollar,
             "min_pct": min_pct,
             "basis": b,
+            "sort": sc["sort"],
+            "dir": sc["dir"],
+            "sort_links": sc["sort_links"],
             "active": "price_drops",
         }),
     )
@@ -339,19 +440,29 @@ def price_drops_page(
 @router.get("/purchased")
 def purchased_page(
     request: Request,
+    sort: str = "seen",
+    dir: str = "desc",
     page: int = Query(1, ge=1),
     per_page: int = Query(DEFAULT_PER_PAGE),
 ):
     rows = services.purchased_books()
+    s, d = _sort_dir(sort, dir, PURCHASED_SORT_DEFAULTS)
+    rows = services.sort_book_rows(rows, s, d)
+    extra = {"per_page": _per_page(per_page)}
     pagination = paginate(
-        rows, page=page, per_page=_per_page(per_page), base_url="/purchased"
+        rows, page=page, per_page=_per_page(per_page), base_url="/purchased",
+        extra_query=extra,
     )
+    sc = _sort_context("/purchased", extra, s, d, PURCHASED_SORT_DEFAULTS)
     return templates.TemplateResponse(
         request,
         "purchased.html",
         _ctx({
             "rows": pagination["rows"],
             "pagination": pagination,
+            "sort": sc["sort"],
+            "dir": sc["dir"],
+            "sort_links": sc["sort_links"],
             "active": "purchased",
         }),
     )
