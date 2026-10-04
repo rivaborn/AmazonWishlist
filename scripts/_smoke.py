@@ -2,10 +2,16 @@
 against a fake scraped payload (no network)."""
 import os
 import shutil
+import sys
 import tempfile
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
+
+# Allow `python scripts/_smoke.py` from the repo root (the documented command):
+# without this, sys.path[0] is `scripts/`, so `from app import ...` below fails
+# with ModuleNotFoundError on a fresh checkout unless PYTHONPATH is set.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 # Use a throwaway DB
 _tmp = Path(tempfile.mkdtemp(prefix="wishlist-smoke-"))

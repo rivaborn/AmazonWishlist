@@ -376,14 +376,27 @@ def run_full_scrape(resume: bool = False) -> dict[str, int]:
 
     interval = max(0, SCRAPE_PER_WISHLIST_SECONDS)
 
-    if resume and (_progress.get("pending_ids") or []):
-        run_id = _progress.get("run_id") or _now()
-        pending_ids = list(_progress.get("pending_ids") or [])
-        started_at = _progress.get("started_at") or _now()
-        done = int(_progress.get("done") or 0)
-        items_total = int(_progress.get("items_total") or 0)
-        total = int(_progress.get("total") or (done + len(pending_ids)))
-        last_started_at = _progress.get("last_started_at")
+    # Snapshot the persisted bookkeeping under the lock so these reads are
+    # consistent with the updates elsewhere in this module (get_progress,
+    # _progress_update, _complete_wishlist). Only `pending_ids` is a meaningful
+    # ``was interrupted`` signal, but reading the rest under the same lock keeps
+    # the resume state coherent if another thread ever touches _progress.
+    with _progress_lock:
+        resume_pending = _progress.get("pending_ids") or []
+        resume_run_id = _progress.get("run_id")
+        resume_started_at = _progress.get("started_at")
+        resume_done = _progress.get("done")
+        resume_items_total = _progress.get("items_total")
+        resume_total = _progress.get("total")
+        resume_last_started_at = _progress.get("last_started_at")
+    if resume and resume_pending:
+        run_id = resume_run_id or _now()
+        pending_ids = list(resume_pending)
+        started_at = resume_started_at or _now()
+        done = int(resume_done or 0)
+        items_total = int(resume_items_total or 0)
+        total = int(resume_total or (done + len(pending_ids)))
+        last_started_at = resume_last_started_at
         log.info("Resuming scrape run %s: %d of %d wishlist(s) remaining",
                  run_id, len(pending_ids), total)
     else:

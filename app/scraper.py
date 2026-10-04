@@ -21,7 +21,7 @@ import re
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Optional
 from urllib.parse import urljoin, urlparse
 
 import httpx
@@ -202,6 +202,23 @@ def _save_diagnostic(label: str, url: str, body: str) -> Path:
 
 
 def _get(client: httpx.Client, url: str) -> httpx.Response:
+    """One HTTP GET with a small retry for unclassified transients.
+
+    This is the LOWER of two deliberately separate retry tiers (CLAUDE.md's
+    "teach the classifier, not the loops" rule):
+
+    - Tier 1, here, handles raw transport/HTTP transients (network errors,
+      bare 503/429 statuses) so a flaky page doesn't even reach the parser.
+    - Tier 2, in ``fetch_wishlist``'s page loop, handles Amazon's two
+      *recognized* block shapes (anti-bot stub, 503 "Dogs" page) via
+      ``_block_retry_delay``, whose policy differs by shape and page number.
+
+    The tiers overlap only on a 503 status that ALSO parses as a "Dogs" page:
+    tier 1 exhausts its in-place backoff, the response is returned, tier 2 then
+    applies the shape-specific retry budget. That double backoff is intentional
+    (the 503 dog page is a transient by its own copy) and bounded by
+    BLOCK_RETRY_503, so a single page can never cost more than a few minutes.
+    """
     last_exc: Optional[Exception] = None
     for attempt in range(3):
         try:
@@ -249,11 +266,10 @@ def _parse_item_row(row, root: str) -> Optional[ScrapedItem]:
 
     availability: str = "available"
     if current_cents is None:
-        unavailable_node = row.css_first('span[id^="itemAvailability_"]')
-        if unavailable_node and "unavailable" in unavailable_node.text().lower():
-            availability = "kindle_unavailable"
-        else:
-            availability = "kindle_unavailable"
+        # No price shown on the wishlist row => the Kindle edition is not
+        # purchasable. (The page-level refiner later disambiguates a genuine
+        # delisting: `_refine_no_price_item` sets `page_404` on an HTTP 404.)
+        availability = "kindle_unavailable"
 
     return ScrapedItem(
         asin=asin,
@@ -515,14 +531,3 @@ def fetch_wishlist(url: str, *, list_label: str = "wishlist") -> list[ScrapedIte
             _refine_no_price_item(client, it)
 
     return list(items.values())
-
-
-def fetch_many(urls: Iterable[str]) -> dict[str, list[ScrapedItem]]:
-    out: dict[str, list[ScrapedItem]] = {}
-    for u in urls:
-        try:
-            out[u] = fetch_wishlist(u)
-        except Exception as e:
-            log.exception("Scrape failed for %s: %s", u, e)
-            out[u] = []
-    return out
