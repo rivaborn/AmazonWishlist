@@ -729,7 +729,7 @@ The BookBub credentials and session link are never committed (the credentials ar
 | `BOOKBUB_BACKFILL_DELAY` | `3` | Seconds between date navigations within a session (jittered ±25%). |
 | `BOOKBUB_BACKFILL_BACKOFF` | `30` | Seconds to sleep between sessions; doubled when Cloudflare re-challenges are detected. |
 | `BOOKBUB_BACKFILL_PROGRESS` | `data/backfill_progress.json` | Per-date status mirror for resuming (atomic writes; gitignored via `data/`). |
-| `LLM_BASE_URL` | `http://192.168.1.40:11430/v1` | Local LLMConfig gateway (OpenAI-compatible) used for optional normalisation. |
+| `LLM_BASE_URL` | `http://192.168.1.15:11430/v1` | Local LLMConfig gateway (OpenAI-compatible) used for optional normalisation. |
 | `LLM_MODEL` | *(unset = off)* | Model for `--llm-model`. The deterministic parse is the deliverable — an unavailable model/gateway only logs a warning and writes the parsed list as-is. |
 | `LLM_TIMEOUT` | `120` | Timeout (seconds) for the LLM call. |
 | `NORDVPN_TOKEN` | *(unset)* | Nord Account access token for the live-deal verifier's host-CLI mode. **Env-only** (or `--nord-token`) — never committed, never given a default. Current clients have no username/password login. |

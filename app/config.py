@@ -301,7 +301,7 @@ BOOKBUB_BACKFILL_PROGRESS = Path(
 # The homelab LLMConfig gateway, OpenAI-compatible. Off by default: the
 # deterministic selectolax parse is the deliverable, and an LLM pass must never
 # block the write when a model is absent or the gateway is unreachable.
-LLM_BASE_URL = os.environ.get("LLM_BASE_URL", "http://192.168.1.40:11430/v1")
+LLM_BASE_URL = os.environ.get("LLM_BASE_URL", "http://192.168.1.15:11430/v1")
 LLM_MODEL = os.environ.get("LLM_MODEL", "").strip()
 LLM_TIMEOUT = float(os.environ.get("LLM_TIMEOUT", "120"))
 
