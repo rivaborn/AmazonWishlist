@@ -1,0 +1,4 @@
+# Line endings: LF in git and on disk on every machine; cmd.exe files CRLF (eol_normalize.py)
+* text=auto eol=lf
+*.bat text eol=crlf
+*.cmd text eol=crlf
